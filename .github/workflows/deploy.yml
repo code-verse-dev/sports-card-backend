@@ -46,7 +46,7 @@ jobs:
                   script: |
                       cd ./public_html/${{ vars.SERVER_DIR }}/
                       npm install --legacy-peer-deps
-                      pm2 reload ecosystem.config.js --update-env || pm2 start ecosystem.config.js
+                      pm2 reload ecosystem.config.cjs --update-env || pm2 start ecosystem.config.cjs
                       pm2 save
 
     health-check:
