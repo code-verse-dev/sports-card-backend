@@ -3,22 +3,25 @@
  */
 import mongoose from "mongoose";
 
-const env = process.env.NODE_ENV || "development";
+function getUri() {
+  return process.env.MONGODB_URI || "";
+}
 
-const dotenv = await import("dotenv");
-dotenv.config({ path: `.env.${env}` });
+function getDbName() {
+  const uri = getUri();
+  const defaultDbFromUri = uri.match(/\/\/(?:[^/]+@)?[^/]+\/([^?]+)/)?.[1];
+  return process.env.MONGODB_DB_NAME || defaultDbFromUri || "sports-card-demo";
+}
 
-const uri = process.env.MONGODB_URI || "";
-const defaultDbFromUri = uri.match(/\/\/(?:[^/]+@)?[^/]+\/([^?]+)/)?.[1];
-const dbName = process.env.MONGODB_DB_NAME || defaultDbFromUri || "sports-card-demo";
-
-export { dbName };
+export { getDbName as dbName };
 
 let connected = false;
 
 export async function connect() {
+  const uri = getUri();
+  const dbName = getDbName();
   if (!uri) return false;
-  if (connected) return true;
+  if (connected || mongoose.connection.readyState === 1) return true;
   await mongoose.connect(uri, { dbName });
   connected = true;
   return true;
@@ -30,6 +33,7 @@ export function isConnected() {
 
 /** For code that needs the underlying MongoClient. Ensures connected first. */
 export async function getClient() {
+  const uri = getUri();
   if (!uri) return null;
   await connect();
   return mongoose.connection.getClient();

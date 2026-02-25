@@ -6,7 +6,7 @@ import path from "path";
 import fs from "fs/promises";
 
 const UPLOADS_DIR = path.join(process.cwd(), "uploads");
-const IMAGE_EXTS = [".png", ".jpg", ".jpeg", ".gif", ".webp"];
+const IMAGE_EXTS = [".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".avif", ".svg", ".tif", ".tiff"];
 
 export { UPLOADS_DIR };
 
@@ -22,16 +22,17 @@ export async function getUploadsCollection() {
 export async function getUploadFilePath(id) {
   const key = String(id || "").trim();
   if (!key) return null;
-  for (const ext of IMAGE_EXTS) {
-    const filePath = path.join(UPLOADS_DIR, `${key}${ext}`);
-    try {
-      await fs.access(filePath);
-      return filePath;
-    } catch {
-      continue;
-    }
+  try {
+    await fs.mkdir(UPLOADS_DIR, { recursive: true });
+    const names = await fs.readdir(UPLOADS_DIR);
+    const match = names.find((name) => path.parse(name).name === key);
+    if (!match) return null;
+    const ext = path.extname(match).toLowerCase();
+    if (ext && !IMAGE_EXTS.includes(ext)) return null;
+    return path.join(UPLOADS_DIR, match);
+  } catch {
+    return null;
   }
-  return null;
 }
 
 /** List uploads by reading the uploads directory. Returns { id, originalName, mimeType } from filename. */
@@ -44,7 +45,22 @@ export async function listUploads() {
       const ext = path.extname(name).toLowerCase();
       if (!IMAGE_EXTS.includes(ext)) continue;
       const id = path.parse(name).name;
-      const mimeType = ext === ".png" ? "image/png" : ext === ".jpg" || ext === ".jpeg" ? "image/jpeg" : ext === ".gif" ? "image/gif" : "image/webp";
+      const mimeType =
+        ext === ".png"
+          ? "image/png"
+          : ext === ".jpg" || ext === ".jpeg"
+            ? "image/jpeg"
+            : ext === ".gif"
+              ? "image/gif"
+              : ext === ".webp"
+                ? "image/webp"
+                : ext === ".bmp"
+                  ? "image/bmp"
+                  : ext === ".avif"
+                    ? "image/avif"
+                    : ext === ".svg"
+                      ? "image/svg+xml"
+                      : "image/tiff";
       list.push({ id, originalName: name, mimeType });
     }
     list.sort((a, b) => (b.originalName || "").localeCompare(a.originalName || ""));
