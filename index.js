@@ -33,6 +33,11 @@ import {
   ensureCategoriesCollections,
 } from "./categories-db.js";
 
+const env = process.env.NODE_ENV || "development";
+
+const dotenv = await import("dotenv");
+dotenv.config({ path: `.env.${env}` });
+
 const app = express();
 const PORT = process.env.PORT || 4000;
 const UPLOAD_ID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
