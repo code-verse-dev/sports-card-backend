@@ -15,13 +15,17 @@ import {
 import { listTemplates } from "./db.js";
 
 const UPLOADS_DIR = path.join(process.cwd(), "uploads");
-const IMAGE_EXTS = [".png", ".jpg", ".jpeg", ".gif", ".webp"];
 const MIME_BY_EXT = {
   ".png": "image/png",
   ".jpg": "image/jpeg",
   ".jpeg": "image/jpeg",
   ".gif": "image/gif",
   ".webp": "image/webp",
+  ".bmp": "image/bmp",
+  ".avif": "image/avif",
+  ".svg": "image/svg+xml",
+  ".tif": "image/tiff",
+  ".tiff": "image/tiff",
 };
 
 async function ensureUploadsDir() {
@@ -34,7 +38,7 @@ const storage = multer.diskStorage({
     cb(null, UPLOADS_DIR);
   },
   filename: (_req, file, cb) => {
-    const ext = path.extname(file.originalname) || ".png";
+    const ext = (path.extname(file.originalname) || ".png").toLowerCase();
     const id = randomUUID();
     cb(null, `${id}${ext}`);
   },
@@ -44,9 +48,9 @@ const upload = multer({
   storage,
   limits: { fileSize: 10 * 1024 * 1024 },
   fileFilter: (_req, file, cb) => {
-    const allowed = /^image\/(jpeg|png|gif|webp)$/i.test(file.mimetype);
+    const allowed = /^image\//i.test(file.mimetype);
     if (allowed) cb(null, true);
-    else cb(new Error("Only images (jpeg, png, gif, webp) allowed"));
+    else cb(new Error("Only image files are allowed"));
   },
 });
 
@@ -72,15 +76,9 @@ export function registerUploadsRouter(app) {
     if (!param) return res.status(400).json({ error: "Missing id" });
     const lastDot = param.lastIndexOf(".");
     let id = param;
-    let extsToTry = IMAGE_EXTS;
     if (lastDot > 0) {
       const ext = param.slice(lastDot).toLowerCase();
-      if (IMAGE_EXTS.includes(ext)) {
-        id = param.slice(0, lastDot);
-        extsToTry = [ext];
-      }
-    }
-    for (const ext of extsToTry) {
+      id = param.slice(0, lastDot);
       const filePath = path.join(UPLOADS_DIR, `${id}${ext}`);
       try {
         await fs.access(filePath);
@@ -89,10 +87,24 @@ export function registerUploadsRouter(app) {
         res.sendFile(path.resolve(filePath));
         return;
       } catch {
-        continue;
+        // Fallback below: try any extension if exact one was not found.
       }
     }
-    res.status(404).json({ error: "Not found" });
+    try {
+      const names = await fs.readdir(UPLOADS_DIR);
+      const match = names.find((name) => path.parse(name).name === id);
+      if (!match) {
+        return res.status(404).json({ error: "Not found" });
+      }
+      const ext = path.extname(match).toLowerCase();
+      const filePath = path.join(UPLOADS_DIR, match);
+      res.setHeader("Content-Type", MIME_BY_EXT[ext] || "application/octet-stream");
+      res.setHeader("Cache-Control", "public, max-age=86400, immutable");
+      res.sendFile(path.resolve(filePath));
+      return;
+    } catch {
+      return res.status(404).json({ error: "Not found" });
+    }
   });
 
   app.post("/api/admin/uploads", upload.single("file"), async (req, res) => {

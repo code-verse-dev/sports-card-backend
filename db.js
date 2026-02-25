@@ -8,15 +8,13 @@ import { Template } from "./models/Template.js";
 export { getClient };
 
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const IMAGE_EXT_REGEX = /\.(png|jpe?g|gif|webp)$/i;
 function isUuid(v) {
   return typeof v === "string" && UUID_REGEX.test(v.trim());
 }
-/** Ensure image ref has an extension (default .png) for frontend/static URLs. */
+/** Keep image ref as provided (supports UUID-only and any extension). */
 function withImageExt(v) {
   if (!v || typeof v !== "string") return v;
-  const s = v.trim();
-  return IMAGE_EXT_REGEX.test(s) ? s : s ? `${s}.png` : v;
+  return v.trim();
 }
 
 /** Create database and indexes on startup. */

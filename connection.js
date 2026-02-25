@@ -3,20 +3,9 @@
  */
 import mongoose from "mongoose";
 
-<<<<<<< Updated upstream
-const env = process.env.NODE_ENV || "development";
-
-const dotenv = await import("dotenv");
-dotenv.config({ path: `.env.${env}` });
-
-const uri = process.env.MONGODB_URI || "";
-const defaultDbFromUri = uri.match(/\/\/(?:[^/]+@)?[^/]+\/([^?]+)/)?.[1];
-const dbName = process.env.MONGODB_DB_NAME || defaultDbFromUri || "sports-card-demo";
-=======
 function getUri() {
   return process.env.MONGODB_URI || "";
 }
->>>>>>> Stashed changes
 
 function getDbName() {
   const uri = getUri();
