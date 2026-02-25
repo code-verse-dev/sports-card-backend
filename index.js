@@ -724,8 +724,13 @@ app.put("/api/admin/templates/:templateId", async (req, res) => {
       }
     }
 
-    for (const uploadId of replacedUploadIds) {
-      await cleanupUploadIfUnused(uploadId);
+    // Variations can share image uploads with parent/siblings. To avoid accidental
+    // deletion while editing a variation, only auto-clean replaced uploads when
+    // updating a parent (or standalone) template.
+    if (!existing?.parentId) {
+      for (const uploadId of replacedUploadIds) {
+        await cleanupUploadIfUnused(uploadId);
+      }
     }
 
     res.json({ ok: true, templateId });
