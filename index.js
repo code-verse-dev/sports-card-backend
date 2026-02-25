@@ -342,6 +342,16 @@ app.use(express.json({ limit: "2mb" }));
 
 registerUploadsRouter(app);
 
+app.get("/", async (req, res) => {
+  try {
+    const html = await fs.readFile(path.join(__dirname, "index.html"), "utf-8");
+    res.send(html);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Failed to load home page" });
+  }
+});
+
 // GET /api/templates – list all (for template list page + admin dropdown)
 app.get("/api/templates", async (req, res) => {
   try {
