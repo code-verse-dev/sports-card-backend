@@ -1,7 +1,11 @@
-import "dotenv/config";
+import "./load-env.js";
+import path from "path";
+import { fileURLToPath } from "url";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
 import express from "express";
 import cors from "cors";
-import path from "path";
 import fs from "fs/promises";
 import { connectDB, dbConnected } from "./db.js";
 import { requireAdmin } from "./middleware/auth.js";
@@ -25,7 +29,8 @@ import { getPriceConfig, setPriceConfig } from "./models/PriceConfig.js";
 import { AdminUser, hashPassword } from "./models/AdminUser.js";
 
 const app = express();
-const PORT = process.env.PORT || 5001;
+const PORT = Number(process.env.PORT) || 5001;
+const HOST = (process.env.HOST && String(process.env.HOST).trim() && process.env.HOST !== "null") ? process.env.HOST.trim() : "0.0.0.0";
 
 app.use(cors({ origin: true, credentials: true }));
 app.use(express.json({ limit: "2mb" }));
@@ -409,7 +414,7 @@ async function seedAdminIfNeeded() {
   } catch (err) {
     console.error("DB connect failed:", err.message);
   }
-  app.listen(PORT, () => {
-    console.log(`Server running at http://localhost:${PORT}`);
+  app.listen(PORT, HOST, () => {
+    console.log(`Server running at http://${HOST}:${PORT}`);
   });
 })();
