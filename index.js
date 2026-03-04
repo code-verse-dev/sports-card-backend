@@ -117,12 +117,14 @@ app.get("/api/templates", async (req, res) => {
   }
 });
 
+// GET /api/templates/:idOrSlug – accepts full id, templateId, legacyIds, or slug (last segment).
+// Frontend uses slug-only in URLs; backend resolves slug to template so frontend never needs to send internal id.
 app.get("/api/templates/:idOrSlug", async (req, res) => {
   try {
     if (!dbConnected()) return res.status(503).json({ error: "Database not connected" });
     const param = (req.params.idOrSlug || "").trim();
     if (!param) return res.status(400).json({ error: "Missing id or slug" });
-    const doc = await Template.findOne({
+    let doc = await Template.findOne({
       $or: [
         { id: param },
         { templateId: param },
@@ -130,6 +132,14 @@ app.get("/api/templates/:idOrSlug", async (req, res) => {
         ...(isMongoId(param) ? [{ _id: param }] : []),
       ],
     }).lean();
+    if (!doc) {
+      doc = await Template.findOne({
+        $or: [
+          { id: new RegExp(`/${param.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`) },
+          { templateId: new RegExp(`/${param.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`) },
+        ],
+      }).lean();
+    }
     if (!doc) return res.status(404).json({ error: "Template not found" });
     const id = (doc.id && String(doc.id).trim()) || (doc.templateId && String(doc.templateId).trim()) || doc._id?.toString();
     res.json({ ...doc, id });

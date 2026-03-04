@@ -83,6 +83,44 @@ router.post("/create-checkout-session", async (req, res) => {
   res.json({ sessionId: session.id, url: session.url, orderId });
 });
 
+/** POST /api/orders/place-without-payment - creates order with status "confirmed" (no Stripe). Temporary bypass for testing. */
+router.post("/place-without-payment", async (req, res) => {
+  if (!dbConnected()) {
+    return res.status(503).json({ error: "Database not configured" });
+  }
+  const { customer, items, shippingCents } = req.body || {};
+  if (!customer?.email?.trim() || !customer?.firstName?.trim() || !customer?.lastName?.trim()) {
+    return res.status(400).json({ error: "customer.email, firstName, lastName required" });
+  }
+  if (!items?.length || !Array.isArray(items)) {
+    return res.status(400).json({ error: "items (non-empty array) required" });
+  }
+  const totalCents = items.reduce((sum, i) => sum + (i.priceCents || 0), 0);
+  const shipCents = Number(shippingCents) || 0;
+  const orderDoc = await Order.create({
+    status: "confirmed",
+    customer: {
+      email: String(customer.email).trim(),
+      firstName: String(customer.firstName).trim(),
+      lastName: String(customer.lastName).trim(),
+      phone: customer.phone ? String(customer.phone).trim() : undefined,
+      address: customer.address ? String(customer.address).trim() : undefined,
+      ...(customer.company && { company: String(customer.company).trim() }),
+      ...(customer.addressLine2 && { addressLine2: String(customer.addressLine2).trim() }),
+      ...(customer.city && { city: String(customer.city).trim() }),
+      ...(customer.state && { state: String(customer.state).trim() }),
+      ...(customer.zip && { zip: String(customer.zip).trim() }),
+      ...(customer.country && { country: String(customer.country).trim() }),
+    },
+    items,
+    totalCents,
+    shippingCents: shipCents,
+    notes: customer.notes ? String(customer.notes).trim() : undefined,
+    createAccount: Boolean(customer.createAccount),
+  });
+  res.status(201).json({ id: orderDoc._id.toString() });
+});
+
 /** POST /api/orders/confirm-session - body: { sessionId }. Verifies Stripe session and marks order paid. */
 router.post("/confirm-session", async (req, res) => {
   if (!dbConnected() || !stripe) {

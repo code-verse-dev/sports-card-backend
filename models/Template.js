@@ -3,6 +3,7 @@ const templateSchema = new mongoose.Schema(
   {
     id: { type: String, sparse: true, unique: true },
     templateId: { type: String, sparse: true, unique: true },
+    legacyIds: [String],
     name: { type: String, required: true },
     parentName: { type: String, default: "" },
     template: { type: mongoose.Schema.Types.Mixed, required: true },
