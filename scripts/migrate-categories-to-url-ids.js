@@ -66,3 +66,5 @@ migrate().catch((err) => {
   console.error(err);
   process.exit(1);
 });
+
+// one time migration to update the categories to url ids
