@@ -35,3 +35,6 @@ jspm_packages/
 
 uploads
 *.zip
+
+# Keep scripts/ tracked (migration scripts must be deployed)
+!scripts/
