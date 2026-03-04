@@ -1,10 +1,15 @@
 import "dotenv/config";
 import express from "express";
 import cors from "cors";
+import path from "path";
+import fs from "fs/promises";
 import { connectDB, dbConnected } from "./db.js";
 import { requireAdmin } from "./middleware/auth.js";
 import adminAuthRouter from "./routes/adminAuth.js";
 import stripeRouter from "./routes/stripe.js";
+import { registerUploadsRouter } from "./uploads-router.js";
+import { listCategories, listSubcategories, upsertCategory, upsertSubcategory } from "./categories-db.js";
+import { DEFAULT_CATEGORIES, DEFAULT_SUBCATEGORIES } from "./seed-categories.js";
 import {
   getAllOrders,
   getOrderById,
@@ -15,6 +20,7 @@ import {
 } from "./store/orders.js";
 import { getPrices, setPrices } from "./store/prices.js";
 import { Order } from "./models/Order.js";
+import { Template } from "./models/Template.js";
 import { getPriceConfig, setPriceConfig } from "./models/PriceConfig.js";
 import { AdminUser, hashPassword } from "./models/AdminUser.js";
 
@@ -58,6 +64,111 @@ app.get("/api/prices", async (req, res) => {
   }
 });
 
+// ---------- Public: Categories & Subcategories (from DB; seed with POST /api/admin/categories/seed-defaults) ----------
+app.get("/api/categories", async (req, res) => {
+  try {
+    if (dbConnected()) {
+      const list = await listCategories();
+      return res.json(list);
+    }
+    res.json(DEFAULT_CATEGORIES);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get("/api/subcategories", async (req, res) => {
+  try {
+    const categoryId = req.query.categoryId;
+    if (dbConnected()) {
+      const list = await listSubcategories(categoryId || undefined);
+      return res.json(list);
+    }
+    const list = categoryId
+      ? DEFAULT_SUBCATEGORIES.filter((s) => s.categoryId === categoryId)
+      : DEFAULT_SUBCATEGORIES;
+    res.json(list);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ---------- Public: Templates (from DB) ----------
+// Prefer slug (id or templateId) for URLs; fall back to _id for backwards compatibility
+function isMongoId(s) {
+  return typeof s === "string" && /^[0-9a-fA-F]{24}$/.test(s.trim());
+}
+
+app.get("/api/templates", async (req, res) => {
+  try {
+    if (dbConnected()) {
+      const list = await Template.find({}).lean();
+      const withId = list.map((doc) => ({ ...doc, id: (doc.id && String(doc.id).trim()) || (doc.templateId && String(doc.templateId).trim()) || doc._id?.toString() }));
+      return res.json(withId);
+    }
+    res.json([]);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get("/api/templates/:idOrSlug", async (req, res) => {
+  try {
+    if (!dbConnected()) return res.status(503).json({ error: "Database not connected" });
+    const param = (req.params.idOrSlug || "").trim();
+    if (!param) return res.status(400).json({ error: "Missing id or slug" });
+    const doc = await Template.findOne({
+      $or: [
+        { id: param },
+        { templateId: param },
+        ...(isMongoId(param) ? [{ _id: param }] : []),
+      ],
+    }).lean();
+    if (!doc) return res.status(404).json({ error: "Template not found" });
+    const id = (doc.id && String(doc.id).trim()) || (doc.templateId && String(doc.templateId).trim()) || doc._id?.toString();
+    res.json({ ...doc, id });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+registerUploadsRouter(app);
+
+// Serve built frontend (dist) so the app loads when opening the server URL (e.g. after npm run build).
+const distDir = path.join(process.cwd(), "dist");
+app.use(express.static(distDir, { index: false }));
+
+app.get("/", async (req, res) => {
+  try {
+    // Prefer built SPA so /assets/* and index work
+    const distHtml = path.join(distDir, "index.html");
+    try {
+      await fs.access(distHtml);
+      const html = await fs.readFile(distHtml, "utf-8");
+      return res.send(html);
+    } catch {
+      // No build yet: serve root index.html (only works when using Vite dev server for assets)
+    }
+    const html = await fs.readFile(path.join(process.cwd(), "index.html"), "utf-8");
+    res.send(html);
+  } catch {
+    res.status(404).json({ error: "Not found" });
+  }
+});
+
+// SPA fallback: non-API GET requests serve index so client-side routes work (when using dist)
+app.get("*", async (req, res, next) => {
+  if (req.path.startsWith("/api")) return next();
+  try {
+    const distHtml = path.join(distDir, "index.html");
+    await fs.access(distHtml);
+    const html = await fs.readFile(distHtml, "utf-8");
+    return res.send(html);
+  } catch {
+    next();
+  }
+});
+
 // ---------- Public: Create order (legacy, no Stripe) - only when no DB ----------
 app.post("/api/orders", async (req, res) => {
   try {
@@ -97,6 +208,24 @@ const maybeRequireAdmin = (req, res, next) => {
   if (!dbConnected()) return next();
   requireAdmin(req, res, next);
 };
+
+// ---------- Admin: Seed default categories (URL-style ids) ----------
+app.post("/api/admin/categories/seed-defaults", maybeRequireAdmin, async (req, res) => {
+  try {
+    if (dbConnected()) {
+      for (const c of DEFAULT_CATEGORIES) {
+        await upsertCategory(c);
+      }
+      for (const s of DEFAULT_SUBCATEGORIES) {
+        await upsertSubcategory(s);
+      }
+      return res.json({ ok: true, message: "Categories and subcategories seeded." });
+    }
+    res.status(503).json({ error: "Database not connected" });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
 
 // ---------- Admin: Orders (protected when DB) ----------
 app.get("/api/admin/orders", maybeRequireAdmin, async (req, res) => {

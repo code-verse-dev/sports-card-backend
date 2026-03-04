@@ -1,4 +1,5 @@
 import mongoose from "mongoose";
+import { Template } from "./models/Template.js";
 
 const MONGODB_URI = process.env.MONGODB_URI || "";
 
@@ -18,3 +19,9 @@ export async function connectDB() {
 }
 
 export const dbConnected = () => !!MONGODB_URI && mongoose.connection.readyState === 1;
+
+export async function listTemplates() {
+  if (!dbConnected()) return [];
+  const list = await Template.find({}).lean();
+  return list.map((doc) => ({ ...doc, id: doc._id?.toString() ?? doc.id }));
+}
