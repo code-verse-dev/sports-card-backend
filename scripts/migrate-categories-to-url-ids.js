@@ -1,15 +1,9 @@
 /**
  * One-time migration: update categories, subcategories, and templates from old ids to URL-style ids.
- * Run with: node scripts/migrate-categories-to-url-ids.js (from server/) or node server/scripts/migrate-categories-to-url-ids.js (from root).
+ * Run: node scripts/migrate-categories-to-url-ids.js (from server/) or node server/scripts/migrate-categories-to-url-ids.js (from root).
  * Requires MONGODB_URI in server/.env or in the environment.
  */
-import dotenv from "dotenv";
-import path from "path";
-import { fileURLToPath } from "url";
-
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const serverDir = path.join(__dirname, "..");
-dotenv.config({ path: path.join(serverDir, ".env") });
+import "../load-env.js";
 
 import { connectDB, dbConnected } from "../db.js";
 import { Category } from "../models/Category.js";

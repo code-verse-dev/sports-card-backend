@@ -1,16 +1,9 @@
 /**
  * Backfill template slugs so product URLs use /product/slug/preview instead of /product/UUID/preview.
- * Sets template.id (and templateId if empty) to a URL-safe slug derived from template name.
  * Run: node scripts/backfill-template-slugs.js (from server/) or node server/scripts/backfill-template-slugs.js (from root).
  * Requires MONGODB_URI in server/.env or environment.
  */
-import dotenv from "dotenv";
-import path from "path";
-import { fileURLToPath } from "url";
-
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const serverDir = path.join(__dirname, "..");
-dotenv.config({ path: path.join(serverDir, ".env") });
+import "../load-env.js";
 
 import { connectDB, dbConnected } from "../db.js";
 import { Template } from "../models/Template.js";
