@@ -15,6 +15,10 @@ import {
 import { listTemplates } from "./db.js";
 
 const UPLOADS_DIR = path.join(process.cwd(), "uploads");
+
+/** Max size per file (20 MB). If using a reverse proxy (e.g. nginx), set client_max_body_size to match. */
+const MAX_UPLOAD_BYTES = 20 * 1024 * 1024;
+
 const MIME_BY_EXT = {
   ".png": "image/png",
   ".jpg": "image/jpeg",
@@ -46,7 +50,7 @@ const storage = multer.diskStorage({
 
 const upload = multer({
   storage,
-  limits: { fileSize: 10 * 1024 * 1024 },
+  limits: { fileSize: MAX_UPLOAD_BYTES },
   fileFilter: (_req, file, cb) => {
     const allowed = /^image\//i.test(file.mimetype);
     if (allowed) cb(null, true);
@@ -152,4 +156,4 @@ export function registerUploadsRouter(app) {
   });
 }
 
-export { ensureUploadsDir, UPLOADS_DIR };
+export { ensureUploadsDir, UPLOADS_DIR, MAX_UPLOAD_BYTES };
