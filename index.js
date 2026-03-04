@@ -106,12 +106,12 @@ function isMongoId(s) {
 
 app.get("/api/templates", async (req, res) => {
   try {
-    if (dbConnected()) {
-      const list = await Template.find({}).lean();
-      const withId = list.map((doc) => ({ ...doc, id: (doc.id && String(doc.id).trim()) || (doc.templateId && String(doc.templateId).trim()) || doc._id?.toString() }));
-      return res.json(withId);
+    if (!dbConnected()) {
+      return res.status(503).json({ error: "Database not connected", db: false });
     }
-    res.json([]);
+    const list = await Template.find({}).lean();
+    const withId = list.map((doc) => ({ ...doc, id: (doc.id && String(doc.id).trim()) || (doc.templateId && String(doc.templateId).trim()) || doc._id?.toString() }));
+    return res.json(withId);
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
