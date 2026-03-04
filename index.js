@@ -29,7 +29,7 @@ import { getPriceConfig, setPriceConfig } from "./models/PriceConfig.js";
 import { AdminUser, hashPassword } from "./models/AdminUser.js";
 
 const app = express();
-const PORT = Number(process.env.PORT) || 5001;
+const PORT = Number(process.env.PORT) || 4043;
 const HOST = (process.env.HOST && String(process.env.HOST).trim() && process.env.HOST !== "null") ? process.env.HOST.trim() : "0.0.0.0";
 
 app.use(cors({ origin: true, credentials: true }));
@@ -126,6 +126,7 @@ app.get("/api/templates/:idOrSlug", async (req, res) => {
       $or: [
         { id: param },
         { templateId: param },
+        { legacyIds: param },
         ...(isMongoId(param) ? [{ _id: param }] : []),
       ],
     }).lean();
