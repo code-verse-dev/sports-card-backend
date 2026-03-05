@@ -104,12 +104,27 @@ function isMongoId(s) {
   return typeof s === "string" && /^[0-9a-fA-F]{24}$/.test(s.trim());
 }
 
+function escapeRegex(s) {
+  return String(s).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 app.get("/api/templates", async (req, res) => {
   try {
     if (!dbConnected()) {
       return res.status(503).json({ error: "Database not connected", db: false });
     }
-    const list = await Template.find({}).lean();
+    const qCategoryId = req.query.categoryId;
+    const qSubcategoryId = req.query.subcategoryId;
+    const filter = {};
+    if (qCategoryId && String(qCategoryId).trim()) {
+      const val = String(qCategoryId).trim();
+      filter.categoryId = new RegExp(`^${escapeRegex(val)}$`, "i");
+    }
+    if (qSubcategoryId && String(qSubcategoryId).trim()) {
+      const val = String(qSubcategoryId).trim();
+      filter.subcategoryId = new RegExp(`^${escapeRegex(val)}$`, "i");
+    }
+    const list = await Template.find(filter).lean();
     const withId = list.map((doc) => ({ ...doc, id: (doc.id && String(doc.id).trim()) || (doc.templateId && String(doc.templateId).trim()) || doc._id?.toString() }));
     return res.json(withId);
   } catch (e) {
