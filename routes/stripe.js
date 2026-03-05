@@ -145,4 +145,102 @@ router.post("/confirm-session", async (req, res) => {
   res.json(order);
 });
 
+/** POST /api/orders/create-payment-intent
+ * Body: { customer?, items, shippingCents, taxCents }. Customer optional so card fields can show immediately.
+ * Creates order (pending_payment), creates PaymentIntent (card only), returns { clientSecret, orderId }.
+ */
+router.post("/create-payment-intent", async (req, res) => {
+  if (!dbConnected()) {
+    return res.status(503).json({ error: "Database not configured" });
+  }
+  if (!stripe) {
+    return res.status(503).json({ error: "Stripe not configured. Set STRIPE_SECRET_KEY." });
+  }
+  const { customer, items, shippingCents, taxCents } = req.body || {};
+  if (!items?.length || !Array.isArray(items)) {
+    return res.status(400).json({ error: "items (non-empty array) required" });
+  }
+  const totalCents = items.reduce((sum, i) => sum + (i.priceCents || 0), 0);
+  const shipCents = Number(shippingCents) || 0;
+  const taxCentsVal = Number(taxCents) || 0;
+  const amountCents = totalCents + shipCents + taxCentsVal;
+  if (amountCents < 50) {
+    return res.status(400).json({ error: "Amount too small" });
+  }
+  const hasCustomer = customer && (customer.email?.trim() || customer.firstName?.trim() || customer.lastName?.trim());
+  const orderDoc = await Order.create({
+    status: "pending_payment",
+    customer: hasCustomer
+      ? {
+          email: String(customer.email || "").trim() || undefined,
+          firstName: String(customer.firstName || "").trim() || undefined,
+          lastName: String(customer.lastName || "").trim() || undefined,
+          phone: customer.phone ? String(customer.phone).trim() : undefined,
+          address: customer.address ? String(customer.address).trim() : undefined,
+          ...(customer.company && { company: String(customer.company).trim() }),
+          ...(customer.addressLine2 && { addressLine2: String(customer.addressLine2).trim() }),
+          ...(customer.city && { city: String(customer.city).trim() }),
+          ...(customer.state && { state: String(customer.state).trim() }),
+          ...(customer.zip && { zip: String(customer.zip).trim() }),
+          ...(customer.country && { country: String(customer.country).trim() }),
+          notes: customer.notes ? String(customer.notes).trim() : undefined,
+          createAccount: Boolean(customer.createAccount),
+        }
+      : {},
+    items,
+    totalCents,
+    shippingCents: shipCents,
+  });
+  const orderId = orderDoc._id.toString();
+  const paymentIntent = await stripe.paymentIntents.create({
+    amount: amountCents,
+    currency: "usd",
+    metadata: { orderId },
+    payment_method_types: ["card"],
+  });
+  res.json({ clientSecret: paymentIntent.client_secret, orderId });
+});
+
+/** POST /api/orders/confirm-payment - body: { paymentIntentId, customer? }. Verifies payment and marks order confirmed; optional customer updates order. */
+router.post("/confirm-payment", async (req, res) => {
+  if (!dbConnected() || !stripe) {
+    return res.status(503).json({ error: "Server not configured" });
+  }
+  const { paymentIntentId, customer } = req.body || {};
+  if (!paymentIntentId) {
+    return res.status(400).json({ error: "paymentIntentId required" });
+  }
+  const paymentIntent = await stripe.paymentIntents.retrieve(paymentIntentId);
+  if (paymentIntent.status !== "succeeded") {
+    return res.status(400).json({ error: "Payment not completed" });
+  }
+  const orderId = paymentIntent.metadata?.orderId;
+  if (!orderId) {
+    return res.status(400).json({ error: "Order not found" });
+  }
+  const update = { status: "confirmed" };
+  if (customer && (customer.email?.trim() || customer.firstName?.trim() || customer.lastName?.trim())) {
+    update.customer = {
+      email: String(customer.email || "").trim() || undefined,
+      firstName: String(customer.firstName || "").trim() || undefined,
+      lastName: String(customer.lastName || "").trim() || undefined,
+      phone: customer.phone ? String(customer.phone).trim() : undefined,
+      address: customer.address ? String(customer.address).trim() : undefined,
+      ...(customer.company && { company: String(customer.company).trim() }),
+      ...(customer.addressLine2 && { addressLine2: String(customer.addressLine2).trim() }),
+      ...(customer.city && { city: String(customer.city).trim() }),
+      ...(customer.state && { state: String(customer.state).trim() }),
+      ...(customer.zip && { zip: String(customer.zip).trim() }),
+      ...(customer.country && { country: String(customer.country).trim() }),
+      notes: customer.notes ? String(customer.notes).trim() : undefined,
+      createAccount: Boolean(customer.createAccount),
+    };
+  }
+  const order = await Order.findByIdAndUpdate(orderId, update, { new: true });
+  if (!order) {
+    return res.status(404).json({ error: "Order not found" });
+  }
+  res.json(order);
+});
+
 export default router;
