@@ -19,6 +19,7 @@ const defaultPrices = {
   pdfOption: { addPrice: 10 },
   baseShipping: 8,
   freeShippingThreshold: 75,
+  taxPercent: 0,
 };
 
 let prices = { ...defaultPrices };

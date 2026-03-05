@@ -240,6 +240,39 @@ const maybeRequireAdmin = (req, res, next) => {
   requireAdmin(req, res, next);
 };
 
+// ---------- Admin: Templates (PUT update) ----------
+app.put("/api/admin/templates/:id", maybeRequireAdmin, async (req, res) => {
+  try {
+    if (!dbConnected()) return res.status(503).json({ error: "Database not connected" });
+    const param = (req.params.id || "").trim();
+    if (!param) return res.status(400).json({ error: "Missing template id" });
+    const doc = await Template.findOne({
+      $or: [
+        { id: param },
+        { templateId: param },
+        { legacyIds: param },
+        ...(isMongoId(param) ? [{ _id: param }] : []),
+      ],
+    });
+    if (!doc) return res.status(404).json({ error: "Template not found" });
+    const body = req.body || {};
+    const allowed = [
+      "name", "parentName", "template", "categoryId", "subcategoryId",
+      "preview", "front", "back", "parentId", "isParent",
+      "productDetailsTitle", "productDetails", "properties",
+    ];
+    for (const key of allowed) {
+      if (body[key] !== undefined) doc.set(key, body[key]);
+    }
+    await doc.save();
+    const out = doc.toObject();
+    const id = (out.id && String(out.id).trim()) || (out.templateId && String(out.templateId).trim()) || out._id?.toString();
+    res.json({ ...out, id });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // ---------- Admin: Seed default categories (URL-style ids) ----------
 app.post("/api/admin/categories/seed-defaults", maybeRequireAdmin, async (req, res) => {
   try {
