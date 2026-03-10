@@ -34,7 +34,7 @@ const PORT = Number(process.env.PORT) || 4043;
 const HOST = (process.env.HOST && String(process.env.HOST).trim() && process.env.HOST !== "null") ? process.env.HOST.trim() : "0.0.0.0";
 
 app.use(cors({ origin: true, credentials: true }));
-app.use(express.json({ limit: "2mb" }));
+app.use(express.json({ limit: "10mb" }));
 
 // ----- Helpers when using DB -----
 function orderToJson(doc) {
