@@ -125,7 +125,7 @@ router.post("/place-without-payment", optionalCustomer, async (req, res) => {
 });
 
 /** POST /api/orders/confirm-session - body: { sessionId }. Verifies Stripe session and marks order paid. */
-router.post("/confirm-session", async (req, res) => {
+router.post("/confirm-session", optionalCustomer, async (req, res) => {
   if (!dbConnected() || !stripe) {
     return res.status(503).json({ error: "Server not configured" });
   }
@@ -141,7 +141,8 @@ router.post("/confirm-session", async (req, res) => {
   if (!orderId) {
     return res.status(400).json({ error: "Order not found" });
   }
-  const order = await Order.findByIdAndUpdate(orderId, { status: "confirmed" }, { new: true });
+  const update = { status: "confirmed", ...(req.customerUser?._id && { customerId: req.customerUser._id }) };
+  const order = await Order.findByIdAndUpdate(orderId, update, { new: true });
   if (!order) {
     return res.status(404).json({ error: "Order not found" });
   }
