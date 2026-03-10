@@ -10,6 +10,7 @@ import fs from "fs/promises";
 import { connectDB, dbConnected } from "./db.js";
 import { requireAdmin } from "./middleware/auth.js";
 import adminAuthRouter from "./routes/adminAuth.js";
+import userAuthRouter from "./routes/userAuth.js";
 import stripeRouter from "./routes/stripe.js";
 import { registerUploadsRouter } from "./uploads-router.js";
 import { listCategories, listSubcategories, upsertCategory, upsertSubcategory } from "./categories-db.js";
@@ -233,6 +234,9 @@ app.use("/api/orders", stripeRouter);
 
 // ---------- Admin auth (no auth middleware) ----------
 app.use("/api/admin", adminAuthRouter);
+
+// ---------- Customer (store) auth: login, register, orders ----------
+app.use("/api/user", userAuthRouter);
 
 // Optional admin auth when DB is connected
 const maybeRequireAdmin = (req, res, next) => {
