@@ -7,6 +7,15 @@ const customerUserSchema = new mongoose.Schema(
     passwordHash: { type: String, required: true },
     firstName: { type: String, trim: true },
     lastName: { type: String, trim: true },
+    // Saved billing/shipping for checkout auto-fill
+    phone: { type: String, trim: true },
+    company: { type: String, trim: true },
+    address: { type: String, trim: true },
+    addressLine2: { type: String, trim: true },
+    city: { type: String, trim: true },
+    state: { type: String, trim: true },
+    zip: { type: String, trim: true },
+    country: { type: String, trim: true },
   },
   { timestamps: true }
 );

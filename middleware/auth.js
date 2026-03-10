@@ -55,3 +55,22 @@ export function requireCustomer(req, res, next) {
     })
     .catch((err) => res.status(500).json({ error: err.message }));
 }
+
+/** Optional customer auth: if Bearer token present and valid, set req.customerUser; otherwise leave undefined and continue. */
+export function optionalCustomer(req, res, next) {
+  const auth = req.headers.authorization;
+  const token = auth?.startsWith("Bearer ") ? auth.slice(7) : null;
+  if (!token) {
+    return next();
+  }
+  const decoded = verifyToken(token);
+  if (!decoded?.userId || decoded?.type !== "customer") {
+    return next();
+  }
+  CustomerUser.findById(decoded.userId)
+    .then((user) => {
+      if (user) req.customerUser = user;
+      next();
+    })
+    .catch(() => next());
+}

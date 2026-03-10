@@ -76,7 +76,7 @@ router.post("/login", async (req, res) => {
   });
 });
 
-/** GET /api/user/me - requires auth. Returns current user profile. */
+/** GET /api/user/me - requires auth. Returns current user profile including saved billing. */
 router.get("/me", requireCustomer, (req, res) => {
   const u = req.customerUser;
   if (!u) return res.status(401).json({ error: "Unauthorized" });
@@ -84,22 +84,46 @@ router.get("/me", requireCustomer, (req, res) => {
     email: u.email,
     firstName: u.firstName,
     lastName: u.lastName,
+    phone: u.phone,
+    company: u.company,
+    address: u.address,
+    addressLine2: u.addressLine2,
+    city: u.city,
+    state: u.state,
+    zip: u.zip,
+    country: u.country,
   });
 });
 
-/** PATCH /api/user/me - requires auth. Body: { firstName?, lastName? }. */
+/** PATCH /api/user/me - requires auth. Body: { firstName?, lastName?, phone?, company?, address?, addressLine2?, city?, state?, zip?, country? }. */
 router.patch("/me", requireCustomer, async (req, res) => {
   try {
     const user = req.customerUser;
     if (!user) return res.status(401).json({ error: "Unauthorized" });
-    const { firstName, lastName } = req.body || {};
+    const { firstName, lastName, phone, company, address, addressLine2, city, state, zip, country } = req.body || {};
     if (firstName !== undefined) user.firstName = String(firstName).trim() || undefined;
     if (lastName !== undefined) user.lastName = String(lastName).trim() || undefined;
+    if (phone !== undefined) user.phone = String(phone).trim() || undefined;
+    if (company !== undefined) user.company = String(company).trim() || undefined;
+    if (address !== undefined) user.address = String(address).trim() || undefined;
+    if (addressLine2 !== undefined) user.addressLine2 = String(addressLine2).trim() || undefined;
+    if (city !== undefined) user.city = String(city).trim() || undefined;
+    if (state !== undefined) user.state = String(state).trim() || undefined;
+    if (zip !== undefined) user.zip = String(zip).trim() || undefined;
+    if (country !== undefined) user.country = String(country).trim() || undefined;
     await user.save();
     res.json({
       email: user.email,
       firstName: user.firstName,
       lastName: user.lastName,
+      phone: user.phone,
+      company: user.company,
+      address: user.address,
+      addressLine2: user.addressLine2,
+      city: user.city,
+      state: user.state,
+      zip: user.zip,
+      country: user.country,
     });
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -130,20 +154,18 @@ router.post("/change-password", requireCustomer, async (req, res) => {
   }
 });
 
-/** GET /api/user/orders - requires Authorization: Bearer <token>. Returns orders for this customer (by email, case-insensitive). */
+/** GET /api/user/orders - requires Authorization: Bearer <token>. Returns orders for this customer (by customerId if set, else by customer.email case-insensitive). */
 router.get("/orders", requireCustomer, async (req, res) => {
   try {
     if (!dbConnected()) {
       return res.status(503).json({ error: "Orders not available" });
     }
-    const email = req.customerUser?.email;
-    if (!email) return res.status(401).json({ error: "Unauthorized" });
-    const escaped = email.trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    const list = await Order.find({
-      "customer.email": new RegExp(`^${escaped}$`, "i"),
-    })
-      .sort({ createdAt: -1 })
-      .lean();
+    const user = req.customerUser;
+    if (!user) return res.status(401).json({ error: "Unauthorized" });
+    const query = user._id
+      ? { $or: [{ customerId: user._id }, { "customer.email": new RegExp(`^${String(user.email || "").trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, "i") }] }
+      : { "customer.email": new RegExp(`^${String(user.email || "").trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, "i") };
+    const list = await Order.find(query).sort({ createdAt: -1 }).lean();
     const withId = list.map((o) => ({
       ...o,
       id: o._id?.toString(),

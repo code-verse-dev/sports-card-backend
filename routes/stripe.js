@@ -3,6 +3,7 @@ import Stripe from "stripe";
 import { Order } from "../models/Order.js";
 import { getPriceConfig } from "../models/PriceConfig.js";
 import { dbConnected } from "../db.js";
+import { optionalCustomer } from "../middleware/auth.js";
 
 const router = Router();
 const stripe = process.env.STRIPE_SECRET_KEY ? new Stripe(process.env.STRIPE_SECRET_KEY, { apiVersion: "2024-11-20.acacia" }) : null;
@@ -11,7 +12,7 @@ const stripe = process.env.STRIPE_SECRET_KEY ? new Stripe(process.env.STRIPE_SEC
  * Body: { customer, items, successUrl, cancelUrl } (items have templateId, templateName, quantity, priceCents, etc.)
  * Creates order in DB (pending_payment), creates Stripe Checkout Session, returns { sessionId, url, orderId }.
  */
-router.post("/create-checkout-session", async (req, res) => {
+router.post("/create-checkout-session", optionalCustomer, async (req, res) => {
   if (!dbConnected()) {
     return res.status(503).json({ error: "Database not configured" });
   }
@@ -29,6 +30,7 @@ router.post("/create-checkout-session", async (req, res) => {
   const shipCents = Number(shippingCents) || 0;
   const orderDoc = await Order.create({
     status: "pending_payment",
+    customerId: req.customerUser?._id || undefined,
     customer: {
       email: String(customer.email).trim().toLowerCase(),
       firstName: String(customer.firstName).trim(),
@@ -84,7 +86,7 @@ router.post("/create-checkout-session", async (req, res) => {
 });
 
 /** POST /api/orders/place-without-payment - creates order with status "confirmed" (no Stripe). Temporary bypass for testing. */
-router.post("/place-without-payment", async (req, res) => {
+router.post("/place-without-payment", optionalCustomer, async (req, res) => {
   if (!dbConnected()) {
     return res.status(503).json({ error: "Database not configured" });
   }
@@ -99,6 +101,7 @@ router.post("/place-without-payment", async (req, res) => {
   const shipCents = Number(shippingCents) || 0;
   const orderDoc = await Order.create({
     status: "confirmed",
+    customerId: req.customerUser?._id || undefined,
     customer: {
       email: String(customer.email).trim().toLowerCase(),
       firstName: String(customer.firstName).trim(),
@@ -149,7 +152,7 @@ router.post("/confirm-session", async (req, res) => {
  * Body: { customer?, items, shippingCents, taxCents }. Customer optional so card fields can show immediately.
  * Creates order (pending_payment), creates PaymentIntent (card only), returns { clientSecret, orderId }.
  */
-router.post("/create-payment-intent", async (req, res) => {
+router.post("/create-payment-intent", optionalCustomer, async (req, res) => {
   if (!dbConnected()) {
     return res.status(503).json({ error: "Database not configured" });
   }
@@ -170,6 +173,7 @@ router.post("/create-payment-intent", async (req, res) => {
   const hasCustomer = customer && (customer.email?.trim() || customer.firstName?.trim() || customer.lastName?.trim());
   const orderDoc = await Order.create({
     status: "pending_payment",
+    customerId: req.customerUser?._id || undefined,
     customer: hasCustomer
       ? {
           email: (String(customer.email || "").trim() || undefined)?.toLowerCase(),
@@ -202,7 +206,7 @@ router.post("/create-payment-intent", async (req, res) => {
 });
 
 /** POST /api/orders/confirm-payment - body: { paymentIntentId, customer? }. Verifies payment and marks order confirmed; optional customer updates order. */
-router.post("/confirm-payment", async (req, res) => {
+router.post("/confirm-payment", optionalCustomer, async (req, res) => {
   if (!dbConnected() || !stripe) {
     return res.status(503).json({ error: "Server not configured" });
   }
@@ -218,7 +222,7 @@ router.post("/confirm-payment", async (req, res) => {
   if (!orderId) {
     return res.status(400).json({ error: "Order not found" });
   }
-  const update = { status: "confirmed" };
+  const update = { status: "confirmed", ...(req.customerUser?._id && { customerId: req.customerUser._id }) };
   if (customer && (customer.email?.trim() || customer.firstName?.trim() || customer.lastName?.trim())) {
     update.customer = {
       email: (String(customer.email || "").trim() || undefined)?.toLowerCase(),
