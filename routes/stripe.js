@@ -8,6 +8,46 @@ import { optionalCustomer } from "../middleware/auth.js";
 const router = Router();
 const stripe = process.env.STRIPE_SECRET_KEY ? new Stripe(process.env.STRIPE_SECRET_KEY, { apiVersion: "2024-11-20.acacia" }) : null;
 
+/** Build order customer object from request body (all address/details). */
+function buildOrderCustomer(customer) {
+  if (!customer || (!customer.email?.trim() && !customer.firstName?.trim() && !customer.lastName?.trim())) return {};
+  return {
+    email: (String(customer.email || "").trim() || undefined)?.toLowerCase(),
+    firstName: String(customer.firstName || "").trim() || undefined,
+    lastName: String(customer.lastName || "").trim() || undefined,
+    phone: customer.phone ? String(customer.phone).trim() : undefined,
+    address: customer.address ? String(customer.address).trim() : undefined,
+    company: customer.company ? String(customer.company).trim() : undefined,
+    addressLine2: customer.addressLine2 ? String(customer.addressLine2).trim() : undefined,
+    city: customer.city ? String(customer.city).trim() : undefined,
+    state: customer.state ? String(customer.state).trim() : undefined,
+    zip: customer.zip ? String(customer.zip).trim() : undefined,
+    country: customer.country ? String(customer.country).trim() : undefined,
+  };
+}
+
+/** Persist customer details to CustomerUser in DB when logged in (so customer details in DB stay in sync). */
+async function saveCustomerDetailsToUser(user, customer) {
+  if (!user || !customer) return;
+  const c = buildOrderCustomer(customer);
+  if (!c.firstName && !c.lastName && !c.email) return;
+  try {
+    if (c.firstName !== undefined) user.firstName = c.firstName || undefined;
+    if (c.lastName !== undefined) user.lastName = c.lastName || undefined;
+    if (c.phone !== undefined) user.phone = c.phone || undefined;
+    if (c.company !== undefined) user.company = c.company || undefined;
+    if (c.address !== undefined) user.address = c.address || undefined;
+    if (c.addressLine2 !== undefined) user.addressLine2 = c.addressLine2 || undefined;
+    if (c.city !== undefined) user.city = c.city || undefined;
+    if (c.state !== undefined) user.state = c.state || undefined;
+    if (c.zip !== undefined) user.zip = c.zip || undefined;
+    if (c.country !== undefined) user.country = c.country || undefined;
+    await user.save();
+  } catch {
+    // ignore
+  }
+}
+
 /** POST /api/orders/create-checkout-session
  * Body: { customer, items, successUrl, cancelUrl } (items have templateId, templateName, quantity, priceCents, etc.)
  * Creates order in DB (pending_payment), creates Stripe Checkout Session, returns { sessionId, url, orderId }.
@@ -31,13 +71,7 @@ router.post("/create-checkout-session", optionalCustomer, async (req, res) => {
   const orderDoc = await Order.create({
     status: "pending_payment",
     customerId: req.customerUser?._id || undefined,
-    customer: {
-      email: String(customer.email).trim().toLowerCase(),
-      firstName: String(customer.firstName).trim(),
-      lastName: String(customer.lastName).trim(),
-      phone: customer.phone ? String(customer.phone).trim() : undefined,
-      address: customer.address ? String(customer.address).trim() : undefined,
-    },
+    customer: buildOrderCustomer(customer),
     items,
     totalCents,
     shippingCents: shipCents,
@@ -45,6 +79,7 @@ router.post("/create-checkout-session", optionalCustomer, async (req, res) => {
     createAccount: Boolean(customer.createAccount),
   });
   const orderId = orderDoc._id.toString();
+  if (req.customerUser && customer) await saveCustomerDetailsToUser(req.customerUser, customer);
 
   // Each cart item is one Stripe line: priceCents = total for that line, quantity = 1
   const lineItems = items.map((i) => ({
@@ -102,25 +137,14 @@ router.post("/place-without-payment", optionalCustomer, async (req, res) => {
   const orderDoc = await Order.create({
     status: "confirmed",
     customerId: req.customerUser?._id || undefined,
-    customer: {
-      email: String(customer.email).trim().toLowerCase(),
-      firstName: String(customer.firstName).trim(),
-      lastName: String(customer.lastName).trim(),
-      phone: customer.phone ? String(customer.phone).trim() : undefined,
-      address: customer.address ? String(customer.address).trim() : undefined,
-      ...(customer.company && { company: String(customer.company).trim() }),
-      ...(customer.addressLine2 && { addressLine2: String(customer.addressLine2).trim() }),
-      ...(customer.city && { city: String(customer.city).trim() }),
-      ...(customer.state && { state: String(customer.state).trim() }),
-      ...(customer.zip && { zip: String(customer.zip).trim() }),
-      ...(customer.country && { country: String(customer.country).trim() }),
-    },
+    customer: buildOrderCustomer(customer),
     items,
     totalCents,
     shippingCents: shipCents,
     notes: customer.notes ? String(customer.notes).trim() : undefined,
     createAccount: Boolean(customer.createAccount),
   });
+  if (req.customerUser && customer) await saveCustomerDetailsToUser(req.customerUser, customer);
   res.status(201).json({ id: orderDoc._id.toString() });
 });
 
@@ -175,28 +199,13 @@ router.post("/create-payment-intent", optionalCustomer, async (req, res) => {
   const orderDoc = await Order.create({
     status: "pending_payment",
     customerId: req.customerUser?._id || undefined,
-    customer: hasCustomer
-      ? {
-          email: (String(customer.email || "").trim() || undefined)?.toLowerCase(),
-          firstName: String(customer.firstName || "").trim() || undefined,
-          lastName: String(customer.lastName || "").trim() || undefined,
-          phone: customer.phone ? String(customer.phone).trim() : undefined,
-          address: customer.address ? String(customer.address).trim() : undefined,
-          ...(customer.company && { company: String(customer.company).trim() }),
-          ...(customer.addressLine2 && { addressLine2: String(customer.addressLine2).trim() }),
-          ...(customer.city && { city: String(customer.city).trim() }),
-          ...(customer.state && { state: String(customer.state).trim() }),
-          ...(customer.zip && { zip: String(customer.zip).trim() }),
-          ...(customer.country && { country: String(customer.country).trim() }),
-          notes: customer.notes ? String(customer.notes).trim() : undefined,
-          createAccount: Boolean(customer.createAccount),
-        }
-      : {},
+    customer: hasCustomer ? buildOrderCustomer(customer) : {},
     items,
     totalCents,
     shippingCents: shipCents,
   });
   const orderId = orderDoc._id.toString();
+  if (req.customerUser && hasCustomer) await saveCustomerDetailsToUser(req.customerUser, customer);
   const paymentIntent = await stripe.paymentIntents.create({
     amount: amountCents,
     currency: "usd",
@@ -225,22 +234,9 @@ router.post("/confirm-payment", optionalCustomer, async (req, res) => {
   }
   const update = { status: "confirmed", ...(req.customerUser?._id && { customerId: req.customerUser._id }) };
   if (customer && (customer.email?.trim() || customer.firstName?.trim() || customer.lastName?.trim())) {
-    update.customer = {
-      email: (String(customer.email || "").trim() || undefined)?.toLowerCase(),
-      firstName: String(customer.firstName || "").trim() || undefined,
-      lastName: String(customer.lastName || "").trim() || undefined,
-      phone: customer.phone ? String(customer.phone).trim() : undefined,
-      address: customer.address ? String(customer.address).trim() : undefined,
-      ...(customer.company && { company: String(customer.company).trim() }),
-      ...(customer.addressLine2 && { addressLine2: String(customer.addressLine2).trim() }),
-      ...(customer.city && { city: String(customer.city).trim() }),
-      ...(customer.state && { state: String(customer.state).trim() }),
-      ...(customer.zip && { zip: String(customer.zip).trim() }),
-      ...(customer.country && { country: String(customer.country).trim() }),
-      notes: customer.notes ? String(customer.notes).trim() : undefined,
-      createAccount: Boolean(customer.createAccount),
-    };
+    update.customer = buildOrderCustomer(customer);
   }
+  if (req.customerUser && customer) await saveCustomerDetailsToUser(req.customerUser, customer);
   const order = await Order.findByIdAndUpdate(orderId, update, { new: true });
   if (!order) {
     return res.status(404).json({ error: "Order not found" });
