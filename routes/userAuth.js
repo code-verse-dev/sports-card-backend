@@ -130,7 +130,7 @@ router.post("/change-password", requireCustomer, async (req, res) => {
   }
 });
 
-/** GET /api/user/orders - requires Authorization: Bearer <token>. Returns orders for this customer (by email). */
+/** GET /api/user/orders - requires Authorization: Bearer <token>. Returns orders for this customer (by email, case-insensitive). */
 router.get("/orders", requireCustomer, async (req, res) => {
   try {
     if (!dbConnected()) {
@@ -138,8 +138,9 @@ router.get("/orders", requireCustomer, async (req, res) => {
     }
     const email = req.customerUser?.email;
     if (!email) return res.status(401).json({ error: "Unauthorized" });
+    const escaped = email.trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
     const list = await Order.find({
-      "customer.email": new RegExp(`^${email.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, "i"),
+      "customer.email": new RegExp(`^${escaped}$`, "i"),
     })
       .sort({ createdAt: -1 })
       .lean();

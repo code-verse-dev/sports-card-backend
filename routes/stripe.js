@@ -30,7 +30,7 @@ router.post("/create-checkout-session", async (req, res) => {
   const orderDoc = await Order.create({
     status: "pending_payment",
     customer: {
-      email: String(customer.email).trim(),
+      email: String(customer.email).trim().toLowerCase(),
       firstName: String(customer.firstName).trim(),
       lastName: String(customer.lastName).trim(),
       phone: customer.phone ? String(customer.phone).trim() : undefined,
@@ -100,7 +100,7 @@ router.post("/place-without-payment", async (req, res) => {
   const orderDoc = await Order.create({
     status: "confirmed",
     customer: {
-      email: String(customer.email).trim(),
+      email: String(customer.email).trim().toLowerCase(),
       firstName: String(customer.firstName).trim(),
       lastName: String(customer.lastName).trim(),
       phone: customer.phone ? String(customer.phone).trim() : undefined,
@@ -172,7 +172,7 @@ router.post("/create-payment-intent", async (req, res) => {
     status: "pending_payment",
     customer: hasCustomer
       ? {
-          email: String(customer.email || "").trim() || undefined,
+          email: (String(customer.email || "").trim() || undefined)?.toLowerCase(),
           firstName: String(customer.firstName || "").trim() || undefined,
           lastName: String(customer.lastName || "").trim() || undefined,
           phone: customer.phone ? String(customer.phone).trim() : undefined,
@@ -221,7 +221,7 @@ router.post("/confirm-payment", async (req, res) => {
   const update = { status: "confirmed" };
   if (customer && (customer.email?.trim() || customer.firstName?.trim() || customer.lastName?.trim())) {
     update.customer = {
-      email: String(customer.email || "").trim() || undefined,
+      email: (String(customer.email || "").trim() || undefined)?.toLowerCase(),
       firstName: String(customer.firstName || "").trim() || undefined,
       lastName: String(customer.lastName || "").trim() || undefined,
       phone: customer.phone ? String(customer.phone).trim() : undefined,
