@@ -1,4 +1,5 @@
 import { Router } from "express";
+import mongoose from "mongoose";
 import { CustomerUser, hashCustomerPassword } from "../models/CustomerUser.js";
 import { signToken, requireCustomer } from "../middleware/auth.js";
 import { dbConnected } from "../db.js";
@@ -162,9 +163,17 @@ router.get("/orders", requireCustomer, async (req, res) => {
     }
     const user = req.customerUser;
     if (!user) return res.status(401).json({ error: "Unauthorized" });
-    const query = user._id
-      ? { $or: [{ customerId: user._id }, { "customer.email": new RegExp(`^${String(user.email || "").trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, "i") }] }
-      : { "customer.email": new RegExp(`^${String(user.email || "").trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, "i") };
+    const emailRegex = new RegExp(`^${String(user.email || "").trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, "i");
+    const conditions = [{ "customer.email": emailRegex }];
+    if (user._id) {
+      try {
+        const oid = user._id instanceof mongoose.Types.ObjectId ? user._id : new mongoose.Types.ObjectId(String(user._id));
+        conditions.unshift({ customerId: oid });
+      } catch {
+        // ignore invalid id
+      }
+    }
+    const query = conditions.length > 1 ? { $or: conditions } : { "customer.email": emailRegex };
     const list = await Order.find(query).sort({ createdAt: -1 }).lean();
     const withId = list.map((o) => ({
       ...o,
