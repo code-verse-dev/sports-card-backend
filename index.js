@@ -13,7 +13,7 @@ import adminAuthRouter from "./routes/adminAuth.js";
 import userAuthRouter from "./routes/userAuth.js";
 import stripeRouter from "./routes/stripe.js";
 import { registerUploadsRouter } from "./uploads-router.js";
-import { listCategories, listSubcategories, upsertCategory, upsertSubcategory } from "./categories-db.js";
+import { listCategories, listSubcategories, upsertCategory, upsertSubcategory, deleteCategoryById, deleteSubcategoryById, getCategoryById, getSubcategoryById } from "./categories-db.js";
 import { DEFAULT_CATEGORIES, DEFAULT_SUBCATEGORIES } from "./seed-categories.js";
 import {
   getAllOrders,
@@ -125,7 +125,13 @@ app.get("/api/templates", async (req, res) => {
       const val = String(qSubcategoryId).trim();
       filter.subcategoryId = new RegExp(`^${escapeRegex(val)}$`, "i");
     }
-    const list = await Template.find(filter).lean();
+    // When no filters, limit + exclude heavy fields to avoid response truncation (platform body limits)
+    const noFilters = !qCategoryId && !qSubcategoryId;
+    let query = Template.find(filter);
+    if (noFilters) {
+      query = query.limit(300).select("-template -productDetails -productDetailsTitle");
+    }
+    const list = await query.lean();
     const withId = list.map((doc) => ({ ...doc, id: (doc.id && String(doc.id).trim()) || (doc.templateId && String(doc.templateId).trim()) || doc._id?.toString() }));
     return res.json(withId);
   } catch (e) {
@@ -188,7 +194,7 @@ app.get("/", async (req, res) => {
   }
 });
 
-// SPA fallback: non-API GET requests serve index so client-side routes work (when using dist)
+// SPA fallback: non-API GET requests serve index so client-side routes work
 app.get("*", async (req, res, next) => {
   if (req.path.startsWith("/api")) return next();
   try {
@@ -197,9 +203,16 @@ app.get("*", async (req, res, next) => {
     const html = await fs.readFile(distHtml, "utf-8");
     return res.send(html);
   } catch {
-    next();
+    try {
+      const html = await fs.readFile(path.join(process.cwd(), "index.html"), "utf-8");
+      return res.send(html);
+    } catch {
+      next();
+      
+    }
   }
 });
+
 
 // ---------- Public: Create order (legacy, no Stripe) - only when no DB ----------
 app.post("/api/orders", async (req, res) => {
@@ -290,6 +303,115 @@ app.post("/api/admin/categories/seed-defaults", maybeRequireAdmin, async (req, r
       return res.json({ ok: true, message: "Categories and subcategories seeded." });
     }
     res.status(503).json({ error: "Database not connected" });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ---------- Admin: Categories CRUD ----------
+app.post("/api/admin/categories", maybeRequireAdmin, async (req, res) => {
+  try {
+    if (!dbConnected()) return res.status(503).json({ error: "Database not connected" });
+    const { id, name, order } = req.body || {};
+    if (!id || !String(id).trim() || !name || !String(name).trim()) {
+      return res.status(400).json({ error: "id and name required" });
+    }
+    const ok = await upsertCategory({ id: String(id).trim(), name: String(name).trim(), order: Number(order) || 0 });
+    if (!ok) return res.status(400).json({ error: "Invalid category" });
+    const list = await listCategories();
+    res.status(201).json(list.find((c) => c.id === String(id).trim()) || { id: String(id).trim(), name: String(name).trim(), order: Number(order) || 0 });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.put("/api/admin/categories/:id", maybeRequireAdmin, async (req, res) => {
+  try {
+    if (!dbConnected()) return res.status(503).json({ error: "Database not connected" });
+    const id = (req.params.id || "").trim();
+    if (!id) return res.status(400).json({ error: "Missing category id" });
+    const existing = await getCategoryById(id);
+    if (!existing) return res.status(404).json({ error: "Category not found" });
+    const { name, order } = req.body || {};
+    const merged = {
+      id,
+      name: name != null ? String(name).trim() : (existing.name || id),
+      order: order != null ? Number(order) : (existing.order ?? 0),
+    };
+    const ok = await upsertCategory(merged);
+    if (!ok) return res.status(400).json({ error: "Invalid category" });
+    res.json(merged);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.delete("/api/admin/categories/:id", maybeRequireAdmin, async (req, res) => {
+  try {
+    if (!dbConnected()) return res.status(503).json({ error: "Database not connected" });
+    const id = (req.params.id || "").trim();
+    if (!id) return res.status(400).json({ error: "Missing category id" });
+    const ok = await deleteCategoryById(id);
+    if (!ok) return res.status(404).json({ error: "Category not found" });
+    res.status(204).send();
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ---------- Admin: Subcategories CRUD ----------
+app.post("/api/admin/subcategories", maybeRequireAdmin, async (req, res) => {
+  try {
+    if (!dbConnected()) return res.status(503).json({ error: "Database not connected" });
+    const { id, name, categoryId, order } = req.body || {};
+    if (!id || !String(id).trim() || !name || !String(name).trim() || !categoryId || !String(categoryId).trim()) {
+      return res.status(400).json({ error: "id, name, and categoryId required" });
+    }
+    const ok = await upsertSubcategory({
+      id: String(id).trim(),
+      name: String(name).trim(),
+      categoryId: String(categoryId).trim(),
+      order: Number(order) || 0,
+    });
+    if (!ok) return res.status(400).json({ error: "Invalid subcategory" });
+    const list = await listSubcategories();
+    const created = list.find((s) => s.id === String(id).trim()) || { id: String(id).trim(), name: String(name).trim(), categoryId: String(categoryId).trim(), order: Number(order) || 0 };
+    res.status(201).json(created);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.put("/api/admin/subcategories/:id", maybeRequireAdmin, async (req, res) => {
+  try {
+    if (!dbConnected()) return res.status(503).json({ error: "Database not connected" });
+    const id = (req.params.id || "").trim();
+    if (!id) return res.status(400).json({ error: "Missing subcategory id" });
+    const existing = await getSubcategoryById(id);
+    if (!existing) return res.status(404).json({ error: "Subcategory not found" });
+    const { name, categoryId, order } = req.body || {};
+    const merged = {
+      id,
+      name: name != null ? String(name).trim() : (existing.name || id),
+      categoryId: categoryId != null ? String(categoryId).trim() : (existing.categoryId || ""),
+      order: order != null ? Number(order) : (existing.order ?? 0),
+    };
+    const ok = await upsertSubcategory(merged);
+    if (!ok) return res.status(400).json({ error: "Invalid subcategory" });
+    res.json(merged);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.delete("/api/admin/subcategories/:id", maybeRequireAdmin, async (req, res) => {
+  try {
+    if (!dbConnected()) return res.status(503).json({ error: "Database not connected" });
+    const id = (req.params.id || "").trim();
+    if (!id) return res.status(400).json({ error: "Missing subcategory id" });
+    const ok = await deleteSubcategoryById(id);
+    if (!ok) return res.status(404).json({ error: "Subcategory not found" });
+    res.status(204).send();
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
