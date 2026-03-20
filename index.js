@@ -257,7 +257,53 @@ const maybeRequireAdmin = (req, res, next) => {
   requireAdmin(req, res, next);
 };
 
-// ---------- Admin: Templates (PUT update) ----------
+// ---------- Admin: Templates (POST create, PUT update) ----------
+app.post("/api/admin/templates", maybeRequireAdmin, async (req, res) => {
+  try {
+    if (!dbConnected()) return res.status(503).json({ error: "Database not connected" });
+    const { name, categoryId, subcategoryId, template: templateBody } = req.body || {};
+    if (!name || !String(name).trim()) return res.status(400).json({ error: "name required" });
+    if (!categoryId || !String(categoryId).trim()) return res.status(400).json({ error: "categoryId required" });
+    if (!subcategoryId || !String(subcategoryId).trim()) return res.status(400).json({ error: "subcategoryId required" });
+    if (!templateBody || typeof templateBody !== "object") return res.status(400).json({ error: "template object required" });
+
+    const slugBase = String(name).trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "card";
+    const cat = String(categoryId).trim();
+    const sub = String(subcategoryId).trim();
+    let id = `${cat}/${sub}/${slugBase}`;
+    let suffix = 1;
+    while (await Template.findOne({ $or: [{ id }, { templateId: id }] })) {
+      id = `${cat}/${sub}/${slugBase}-${String(suffix).padStart(2, "0")}`;
+      suffix += 1;
+    }
+
+    const previewRef = templateBody.previewImage || templateBody.thumbnailImage || "";
+    const frontRef = (templateBody.front && templateBody.front.backgroundImage) || "";
+    const backRef = (templateBody.back && templateBody.back.backgroundImage) || "";
+
+    const doc = await Template.create({
+      id,
+      templateId: id,
+      name: String(name).trim(),
+      parentName: String(name).trim(),
+      template: templateBody,
+      categoryId: cat,
+      subcategoryId: sub,
+      preview: previewRef || undefined,
+      front: frontRef || undefined,
+      back: backRef || undefined,
+      parentId: null,
+      isParent: true,
+    });
+
+    const out = doc.toObject();
+    const outId = (out.id && String(out.id).trim()) || (out.templateId && String(out.templateId).trim()) || out._id?.toString();
+    res.status(201).json({ ...out, id: outId, templateId: outId });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.put("/api/admin/templates/:id", maybeRequireAdmin, async (req, res) => {
   try {
     if (!dbConnected()) return res.status(503).json({ error: "Database not connected" });
