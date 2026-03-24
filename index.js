@@ -36,6 +36,12 @@ const HOST = (process.env.HOST && String(process.env.HOST).trim() && process.env
 app.use(cors({ origin: true, credentials: true, allowedHeaders: ["Content-Type", "Authorization"] }));
 app.use(express.json({ limit: "10mb" }));
 
+/** When DB is connected, require admin JWT; otherwise no-op (legacy in-memory mode). */
+const maybeRequireAdmin = (req, res, next) => {
+  if (!dbConnected()) return next();
+  requireAdmin(req, res, next);
+};
+
 // ----- Helpers when using DB -----
 function orderToJson(doc) {
   if (!doc) return null;
@@ -129,7 +135,7 @@ app.get("/api/templates", async (req, res) => {
     const noFilters = !qCategoryId && !qSubcategoryId;
     let query = Template.find(filter);
     if (noFilters) {
-      query = query.limit(300).select("-template -productDetails -productDetailsTitle");
+      query = query.limit(2000).select("-template -productDetails -productDetailsTitle");
     }
     const list = await query.lean();
     const withId = list.map((doc) => ({ ...doc, id: (doc.id && String(doc.id).trim()) || (doc.templateId && String(doc.templateId).trim()) || doc._id?.toString() }));
@@ -170,130 +176,91 @@ app.get("/api/templates/:idOrSlug", async (req, res) => {
   }
 });
 
-registerUploadsRouter(app);
-
-// Serve built frontend (dist) so the app loads when opening the server URL (e.g. after npm run build).
-const distDir = path.join(process.cwd(), "dist");
-app.use(express.static(distDir, { index: false }));
-
-app.get("/", async (req, res) => {
-  try {
-    // Prefer built SPA so /assets/* and index work
-    const distHtml = path.join(distDir, "index.html");
-    try {
-      await fs.access(distHtml);
-      const html = await fs.readFile(distHtml, "utf-8");
-      return res.send(html);
-    } catch {
-      // No build yet: serve root index.html (only works when using Vite dev server for assets)
-    }
-    const html = await fs.readFile(path.join(process.cwd(), "index.html"), "utf-8");
-    res.send(html);
-  } catch {
-    res.status(404).json({ error: "Not found" });
-  }
-});
-
-// SPA fallback: non-API GET requests serve index so client-side routes work
-app.get("*", async (req, res, next) => {
-  if (req.path.startsWith("/api")) return next();
-  try {
-    const distHtml = path.join(distDir, "index.html");
-    await fs.access(distHtml);
-    const html = await fs.readFile(distHtml, "utf-8");
-    return res.send(html);
-  } catch {
-    try {
-      const html = await fs.readFile(path.join(process.cwd(), "index.html"), "utf-8");
-      return res.send(html);
-    } catch {
-      next();
-      
-    }
-  }
-});
-
-
-// ---------- Public: Create order (legacy, no Stripe) - only when no DB ----------
-app.post("/api/orders", async (req, res) => {
-  try {
-    if (dbConnected()) {
-      return res.status(400).json({ error: "Use POST /api/orders/create-checkout-session for payment" });
-    }
-    const { customer, items, totalCents, shippingCents, notes, createAccount } = req.body;
-    if (!customer || !items || !Array.isArray(items) || items.length === 0) {
-      return res.status(400).json({ error: "customer and items (non-empty array) required" });
-    }
-    const { email, firstName, lastName, phone, address } = customer;
-    if (!email?.trim() || !firstName?.trim() || !lastName?.trim()) {
-      return res.status(400).json({ error: "customer.email, firstName, lastName required" });
-    }
-    const order = createOrder({
-      customer: { email: String(email).trim(), firstName: String(firstName).trim(), lastName: String(lastName).trim(), phone: phone ? String(phone).trim() : undefined, address: address ? String(address).trim() : undefined },
-      items,
-      totalCents: totalCents ?? 0,
-      shippingCents: shippingCents ?? 0,
-      notes: notes ? String(notes).trim() : undefined,
-      createAccount: Boolean(createAccount),
-    });
-    res.status(201).json(order);
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
-});
-
-// ---------- Public: Stripe checkout (create session, confirm) ----------
-app.use("/api/orders", stripeRouter);
-
-// ---------- Admin auth (no auth middleware) ----------
-app.use("/api/admin", adminAuthRouter);
-
-// ---------- Customer (store) auth: login, register, orders ----------
-app.use("/api/user", userAuthRouter);
-
-// Optional admin auth when DB is connected
-const maybeRequireAdmin = (req, res, next) => {
-  if (!dbConnected()) return next();
-  requireAdmin(req, res, next);
-};
-
-// ---------- Admin: Templates (POST create, PUT update) ----------
+// Register before app.use("/api/admin", …) so /api/admin/templates/* is not swallowed by the auth router.
+// ---------- Admin: Templates (POST create, PUT update, DELETE) ----------
 app.post("/api/admin/templates", maybeRequireAdmin, async (req, res) => {
   try {
     if (!dbConnected()) return res.status(503).json({ error: "Database not connected" });
-    const { name, categoryId, subcategoryId, template: templateBody } = req.body || {};
+    const body = req.body || {};
+    const {
+      name,
+      categoryId,
+      subcategoryId,
+      template: templateBody,
+      templateId: bodyTemplateId,
+      parentId: bodyParentId,
+      isParent: bodyIsParent,
+      parentName: bodyParentName,
+    } = body;
     if (!name || !String(name).trim()) return res.status(400).json({ error: "name required" });
     if (!categoryId || !String(categoryId).trim()) return res.status(400).json({ error: "categoryId required" });
     if (!subcategoryId || !String(subcategoryId).trim()) return res.status(400).json({ error: "subcategoryId required" });
     if (!templateBody || typeof templateBody !== "object") return res.status(400).json({ error: "template object required" });
 
-    const slugBase = String(name).trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "card";
     const cat = String(categoryId).trim();
     const sub = String(subcategoryId).trim();
-    let id = `${cat}/${sub}/${slugBase}`;
-    let suffix = 1;
-    while (await Template.findOne({ $or: [{ id }, { templateId: id }] })) {
-      id = `${cat}/${sub}/${slugBase}-${String(suffix).padStart(2, "0")}`;
-      suffix += 1;
+
+    const explicitTid =
+      bodyTemplateId != null && String(bodyTemplateId).trim() !== "" ? String(bodyTemplateId).trim() : "";
+
+    let id;
+    if (explicitTid) {
+      id = explicitTid;
+      const exists = await Template.findOne({ $or: [{ id }, { templateId: id }] });
+      if (exists) return res.status(409).json({ error: "A template with this id already exists" });
+    } else {
+      const slugBase = String(name).trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "card";
+      id = `${cat}/${sub}/${slugBase}`;
+      let suffix = 1;
+      while (await Template.findOne({ $or: [{ id }, { templateId: id }] })) {
+        id = `${cat}/${sub}/${slugBase}-${String(suffix).padStart(2, "0")}`;
+        suffix += 1;
+      }
+    }
+
+    const parentId =
+      bodyParentId != null && String(bodyParentId).trim() !== "" ? String(bodyParentId).trim() : null;
+
+    const isParentFlag = parentId != null ? false : bodyIsParent !== false;
+
+    let parentNameForDoc = String(name).trim();
+    if (bodyParentName != null && String(bodyParentName).trim() !== "") {
+      parentNameForDoc = String(bodyParentName).trim();
+    } else if (parentId) {
+      const p = await Template.findOne({
+        $or: [
+          { id: parentId },
+          { templateId: parentId },
+          { legacyIds: parentId },
+          ...(isMongoId(parentId) ? [{ _id: parentId }] : []),
+        ],
+      }).lean();
+      if (p) {
+        const pname = p.parentName && String(p.parentName).trim();
+        const n = p.name && String(p.name).trim();
+        parentNameForDoc = pname || n || parentNameForDoc;
+      }
     }
 
     const previewRef = templateBody.previewImage || templateBody.thumbnailImage || "";
     const frontRef = (templateBody.front && templateBody.front.backgroundImage) || "";
     const backRef = (templateBody.back && templateBody.back.backgroundImage) || "";
 
+    const storedTemplate = { ...templateBody, id };
+
     const doc = await Template.create({
       id,
       templateId: id,
       name: String(name).trim(),
-      parentName: String(name).trim(),
-      template: templateBody,
+      parentName: parentNameForDoc,
+      template: storedTemplate,
       categoryId: cat,
       subcategoryId: sub,
       preview: previewRef || undefined,
       front: frontRef || undefined,
       back: backRef || undefined,
-      parentId: null,
-      isParent: true,
+      parentId,
+      isParent: isParentFlag,
     });
 
     const out = doc.toObject();
@@ -335,6 +302,82 @@ app.put("/api/admin/templates/:id", maybeRequireAdmin, async (req, res) => {
     res.status(500).json({ error: e.message });
   }
 });
+
+app.delete("/api/admin/templates/:id", maybeRequireAdmin, async (req, res) => {
+  try {
+    if (!dbConnected()) return res.status(503).json({ error: "Database not connected" });
+    const param = (req.params.id || "").trim();
+    if (!param) return res.status(400).json({ error: "Missing template id" });
+    const doc = await Template.findOne({
+      $or: [
+        { id: param },
+        { templateId: param },
+        { legacyIds: param },
+        ...(isMongoId(param) ? [{ _id: param }] : []),
+      ],
+    });
+    if (!doc) return res.status(404).json({ error: "Template not found" });
+
+    const parentIdStr = doc.parentId != null ? String(doc.parentId).trim() : "";
+    const isVariation = doc.isParent === false || parentIdStr !== "";
+    if (!isVariation) {
+      const keys = [...new Set([String(doc.id ?? "").trim(), String(doc.templateId ?? "").trim()].filter(Boolean))];
+      if (keys.length) {
+        const childCount = await Template.countDocuments({
+          _id: { $ne: doc._id },
+          parentId: { $in: keys },
+        });
+        if (childCount > 0) {
+          return res.status(400).json({
+            error: "Delete all variations before deleting the parent product.",
+          });
+        }
+      }
+    }
+
+    await Template.deleteOne({ _id: doc._id });
+    res.status(204).send();
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ---------- Public: Create order (legacy, no Stripe) - only when no DB ----------
+app.post("/api/orders", async (req, res) => {
+  try {
+    if (dbConnected()) {
+      return res.status(400).json({ error: "Use POST /api/orders/create-checkout-session for payment" });
+    }
+    const { customer, items, totalCents, shippingCents, notes, createAccount } = req.body;
+    if (!customer || !items || !Array.isArray(items) || items.length === 0) {
+      return res.status(400).json({ error: "customer and items (non-empty array) required" });
+    }
+    const { email, firstName, lastName, phone, address } = customer;
+    if (!email?.trim() || !firstName?.trim() || !lastName?.trim()) {
+      return res.status(400).json({ error: "customer.email, firstName, lastName required" });
+    }
+    const order = createOrder({
+      customer: { email: String(email).trim(), firstName: String(firstName).trim(), lastName: String(lastName).trim(), phone: phone ? String(phone).trim() : undefined, address: address ? String(address).trim() : undefined },
+      items,
+      totalCents: totalCents ?? 0,
+      shippingCents: shippingCents ?? 0,
+      notes: notes ? String(notes).trim() : undefined,
+      createAccount: Boolean(createAccount),
+    });
+    res.status(201).json(order);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ---------- Public: Stripe checkout (create session, confirm) ----------
+app.use("/api/orders", stripeRouter);
+
+// ---------- Admin auth (no auth middleware) ----------
+app.use("/api/admin", adminAuthRouter);
+
+// ---------- Customer (store) auth: login, register, orders ----------
+app.use("/api/user", userAuthRouter);
 
 // ---------- Admin: Seed default categories (URL-style ids) ----------
 app.post("/api/admin/categories/seed-defaults", maybeRequireAdmin, async (req, res) => {
@@ -621,6 +664,49 @@ app.put("/api/admin/prices", maybeRequireAdmin, async (req, res) => {
 // ---------- Health ----------
 app.get("/api/health", (req, res) => {
   res.json({ ok: true, db: dbConnected() });
+});
+
+// Register uploads + static SPA only after all /api routes so DELETE/PUT/POST handlers always match.
+registerUploadsRouter(app);
+
+// Serve built frontend (dist) so the app loads when opening the server URL (e.g. after npm run build).
+const distDir = path.join(process.cwd(), "dist");
+app.use(express.static(distDir, { index: false }));
+
+app.get("/", async (req, res) => {
+  try {
+    // Prefer built SPA so /assets/* and index work
+    const distHtml = path.join(distDir, "index.html");
+    try {
+      await fs.access(distHtml);
+      const html = await fs.readFile(distHtml, "utf-8");
+      return res.send(html);
+    } catch {
+      // No build yet: serve root index.html (only works when using Vite dev server for assets)
+    }
+    const html = await fs.readFile(path.join(process.cwd(), "index.html"), "utf-8");
+    res.send(html);
+  } catch {
+    res.status(404).json({ error: "Not found" });
+  }
+});
+
+// SPA fallback: non-API GET requests serve index so client-side routes work
+app.get("*", async (req, res, next) => {
+  if (req.path.startsWith("/api")) return next();
+  try {
+    const distHtml = path.join(distDir, "index.html");
+    await fs.access(distHtml);
+    const html = await fs.readFile(distHtml, "utf-8");
+    return res.send(html);
+  } catch {
+    try {
+      const html = await fs.readFile(path.join(process.cwd(), "index.html"), "utf-8");
+      return res.send(html);
+    } catch {
+      next();
+    }
+  }
 });
 
 /** On server start only: create default admin (admin@admin.com / admin123) if no admin exists in DB. */
