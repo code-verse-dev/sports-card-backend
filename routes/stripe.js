@@ -4,6 +4,7 @@ import { Order } from "../models/Order.js";
 import { getPriceConfig } from "../models/PriceConfig.js";
 import { dbConnected } from "../db.js";
 import { optionalCustomer } from "../middleware/auth.js";
+import { notifyOrderPlaced } from "../services/orderEmails.js";
 
 const router = Router();
 const stripe = process.env.STRIPE_SECRET_KEY ? new Stripe(process.env.STRIPE_SECRET_KEY, { apiVersion: "2024-11-20.acacia" }) : null;
@@ -145,6 +146,7 @@ router.post("/place-without-payment", optionalCustomer, async (req, res) => {
     createAccount: Boolean(customer.createAccount),
   });
   if (req.customerUser && customer) await saveCustomerDetailsToUser(req.customerUser, customer);
+  notifyOrderPlaced(orderDoc).catch((err) => console.error("[stripe] notifyOrderPlaced:", err?.message || err));
   res.status(201).json({ id: orderDoc._id.toString() });
 });
 
@@ -165,10 +167,17 @@ router.post("/confirm-session", optionalCustomer, async (req, res) => {
   if (!orderId) {
     return res.status(400).json({ error: "Order not found" });
   }
+  const prev = await Order.findById(orderId);
+  if (!prev) {
+    return res.status(404).json({ error: "Order not found" });
+  }
   const update = { status: "confirmed", ...(req.customerUser?._id && { customerId: req.customerUser._id }) };
   const order = await Order.findByIdAndUpdate(orderId, update, { new: true });
   if (!order) {
     return res.status(404).json({ error: "Order not found" });
+  }
+  if (prev.status !== "confirmed" && order.status === "confirmed") {
+    notifyOrderPlaced(order).catch((err) => console.error("[stripe] notifyOrderPlaced:", err?.message || err));
   }
   res.json(order);
 });
@@ -237,9 +246,16 @@ router.post("/confirm-payment", optionalCustomer, async (req, res) => {
     update.customer = buildOrderCustomer(customer);
   }
   if (req.customerUser && customer) await saveCustomerDetailsToUser(req.customerUser, customer);
+  const prev = await Order.findById(orderId);
+  if (!prev) {
+    return res.status(404).json({ error: "Order not found" });
+  }
   const order = await Order.findByIdAndUpdate(orderId, update, { new: true });
   if (!order) {
     return res.status(404).json({ error: "Order not found" });
+  }
+  if (prev.status !== "confirmed" && order.status === "confirmed") {
+    notifyOrderPlaced(order).catch((err) => console.error("[stripe] notifyOrderPlaced:", err?.message || err));
   }
   res.json(order);
 });

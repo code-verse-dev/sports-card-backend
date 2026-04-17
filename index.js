@@ -28,6 +28,7 @@ import { Order } from "./models/Order.js";
 import { Template } from "./models/Template.js";
 import { getPriceConfig, setPriceConfig } from "./models/PriceConfig.js";
 import { AdminUser, hashPassword } from "./models/AdminUser.js";
+import { sendOrderStatusChangedCustomerEmail, sendTrackingInfoCustomerEmail } from "./services/orderEmails.js";
 
 const app = express();
 const PORT = Number(process.env.PORT) || 4043;
@@ -58,6 +59,9 @@ function orderToJson(doc) {
     shippingCents: o.shippingCents,
     notes: o.notes,
     createAccount: o.createAccount,
+    trackingCarrier: o.trackingCarrier,
+    trackingNumber: o.trackingNumber,
+    trackingUrl: o.trackingUrl,
   };
 }
 
@@ -545,9 +549,30 @@ app.get("/api/admin/orders/:id", maybeRequireAdmin, async (req, res) => {
 app.patch("/api/admin/orders/:id", maybeRequireAdmin, async (req, res) => {
   try {
     if (dbConnected()) {
-      const { status, ...rest } = req.body || {};
-      const order = await Order.findByIdAndUpdate(req.params.id, status != null ? { status } : rest, { new: true });
+      const body = req.body || {};
+      const allowed = ["status", "notes", "trackingNumber", "trackingCarrier", "trackingUrl"];
+      const updates = {};
+      for (const key of allowed) {
+        if (body[key] !== undefined) updates[key] = body[key];
+      }
+      const prev = await Order.findById(req.params.id);
+      if (!prev) return res.status(404).json({ error: "Order not found" });
+      const order = await Order.findByIdAndUpdate(req.params.id, { $set: updates }, { new: true });
       if (!order) return res.status(404).json({ error: "Order not found" });
+
+      if (prev.status !== order.status) {
+        sendOrderStatusChangedCustomerEmail(order, prev.status).catch((err) =>
+          console.error("[admin] status email:", err?.message || err)
+        );
+      }
+      const prevTrack = String(prev.trackingNumber || "").trim();
+      const nextTrack = String(order.trackingNumber || "").trim();
+      if (nextTrack && prevTrack !== nextTrack) {
+        sendTrackingInfoCustomerEmail(order).catch((err) =>
+          console.error("[admin] tracking email:", err?.message || err)
+        );
+      }
+
       return res.json(orderToJson(order));
     }
     const { status, ...rest } = req.body || {};
