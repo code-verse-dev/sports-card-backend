@@ -24,6 +24,12 @@ const orderSchema = new mongoose.Schema(
     shippingCents: Number,
     notes: String,
     createAccount: Boolean,
+    /** Carrier for tracking (default UPS). */
+    trackingCarrier: { type: String, default: "UPS", trim: true },
+    /** Shipping tracking number (e.g. UPS). */
+    trackingNumber: { type: String, trim: true },
+    /** Optional full tracking URL; if empty, UPS URL is derived from trackingNumber when carrier is UPS. */
+    trackingUrl: { type: String, trim: true },
   },
   { timestamps: true }
 );
