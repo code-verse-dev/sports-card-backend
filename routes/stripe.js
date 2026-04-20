@@ -105,6 +105,10 @@ router.post("/create-checkout-session", optionalCustomer, async (req, res) => {
     });
   }
 
+  const cust = buildOrderCustomer(customer);
+  const email = cust.email || "";
+  const customerName = [cust.firstName, cust.lastName].filter(Boolean).join(" ").trim();
+
   const session = await stripe.checkout.sessions.create({
     mode: "payment",
     payment_method_types: ["card"],
@@ -112,7 +116,12 @@ router.post("/create-checkout-session", optionalCustomer, async (req, res) => {
     success_url: successUrl || `${req.protocol}://${req.get("host")}/checkout/success?session_id={CHECKOUT_SESSION_ID}`,
     cancel_url: cancelUrl || `${req.protocol}://${req.get("host")}/checkout`,
     client_reference_id: orderId,
-    metadata: { orderId },
+    customer_email: email || undefined,
+    metadata: {
+      orderId,
+      customer_email: email,
+      ...(customerName ? { customer_name: customerName.slice(0, 500) } : {}),
+    },
   });
 
   orderDoc.stripeSessionId = session.id;
@@ -215,11 +224,21 @@ router.post("/create-payment-intent", optionalCustomer, async (req, res) => {
   });
   const orderId = orderDoc._id.toString();
   if (req.customerUser && hasCustomer) await saveCustomerDetailsToUser(req.customerUser, customer);
+  const custPi = hasCustomer ? buildOrderCustomer(customer) : {};
+  const emailPi = custPi.email || "";
+  const namePi = [custPi.firstName, custPi.lastName].filter(Boolean).join(" ").trim();
   const paymentIntent = await stripe.paymentIntents.create({
     amount: amountCents,
     currency: "usd",
-    metadata: { orderId },
     payment_method_types: ["card"],
+    description: emailPi
+      ? `Custom Sports Cards order ${orderId} (${emailPi})`
+      : `Custom Sports Cards order ${orderId}`,
+    metadata: {
+      orderId,
+      ...(emailPi ? { customer_email: emailPi, ...(namePi ? { customer_name: namePi.slice(0, 500) } : {}) } : {}),
+    },
+    ...(emailPi ? { receipt_email: emailPi } : {}),
   });
   res.json({ clientSecret: paymentIntent.client_secret, orderId });
 });
@@ -254,6 +273,27 @@ router.post("/confirm-payment", optionalCustomer, async (req, res) => {
   if (!order) {
     return res.status(404).json({ error: "Order not found" });
   }
+
+  const em = order.customer?.email?.trim();
+  if (em) {
+    try {
+      const pi = await stripe.paymentIntents.retrieve(paymentIntentId);
+      const name = [order.customer?.firstName, order.customer?.lastName].filter(Boolean).join(" ").trim();
+      await stripe.paymentIntents.update(paymentIntentId, {
+        receipt_email: em,
+        description: `Custom Sports Cards order ${orderId} (${em})`,
+        metadata: {
+          ...pi.metadata,
+          orderId: String(orderId),
+          customer_email: em,
+          ...(name ? { customer_name: name.slice(0, 500) } : {}),
+        },
+      });
+    } catch (err) {
+      console.warn("[stripe] paymentIntent update (email on record):", err?.message || err);
+    }
+  }
+
   if (prev.status !== "confirmed" && order.status === "confirmed") {
     notifyOrderPlaced(order).catch((err) => console.error("[stripe] notifyOrderPlaced:", err?.message || err));
   }
