@@ -29,6 +29,7 @@ import { Template } from "./models/Template.js";
 import { getPriceConfig, setPriceConfig } from "./models/PriceConfig.js";
 import { AdminUser, hashPassword } from "./models/AdminUser.js";
 import { sendOrderStatusChangedCustomerEmail, sendTrackingInfoCustomerEmail } from "./services/orderEmails.js";
+import { buildOrderPrintPdfBuffer } from "./services/orderPdf.js";
 
 const app = express();
 const PORT = Number(process.env.PORT) || 4043;
@@ -560,6 +561,24 @@ app.get("/api/admin/orders", maybeRequireAdmin, async (req, res) => {
     }
     const list = getAllOrders({ status: req.query.status, email: req.query.email });
     res.json(list);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+/** PDF of embedded design images for printing (same as email attachment). */
+app.get("/api/admin/orders/:id/print-pdf", maybeRequireAdmin, async (req, res) => {
+  try {
+    if (!dbConnected()) {
+      return res.status(503).json({ error: "Database not connected" });
+    }
+    const order = await Order.findById(req.params.id);
+    if (!order) return res.status(404).json({ error: "Order not found" });
+    const buf = await buildOrderPrintPdfBuffer(order);
+    const short = order._id.toString().slice(-8);
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Disposition", `inline; filename="order-${short}-print.pdf"`);
+    return res.send(buf);
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
