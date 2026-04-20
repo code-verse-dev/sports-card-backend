@@ -135,14 +135,35 @@ app.get("/api/templates", async (req, res) => {
       const val = String(qSubcategoryId).trim();
       filter.subcategoryId = new RegExp(`^${escapeRegex(val)}$`, "i");
     }
-    // When no filters, limit + exclude heavy fields to avoid response truncation (platform body limits)
+    // When no filters: exclude long text fields but keep `template` long enough to derive list thumbnails,
+    // then strip `template` from the JSON (shop relies on top-level `preview` or nested image refs).
     const noFilters = !qCategoryId && !qSubcategoryId;
     let query = Template.find(filter);
     if (noFilters) {
-      query = query.limit(2000).select("-template -productDetails -productDetailsTitle");
+      query = query.limit(2000).select("-productDetails -productDetailsTitle");
     }
     const list = await query.lean();
-    const withId = list.map((doc) => ({ ...doc, id: (doc.id && String(doc.id).trim()) || (doc.templateId && String(doc.templateId).trim()) || doc._id?.toString() }));
+    const withId = list.map((doc) => {
+      let row = { ...doc };
+      if (noFilters && doc.template && typeof doc.template === "object") {
+        const t = doc.template;
+        // Same priority as POST create + Shop grid: nested template images win over stale top-level preview
+        const effective =
+          t.previewImage ||
+          t.thumbnailImage ||
+          doc.preview ||
+          (t.front && t.front.backgroundImage) ||
+          "";
+        if (effective) row.preview = effective;
+        const { template: _drop, ...rest } = row;
+        row = rest;
+      }
+      const id =
+        (doc.id && String(doc.id).trim()) ||
+        (doc.templateId && String(doc.templateId).trim()) ||
+        doc._id?.toString();
+      return { ...row, id };
+    });
     return res.json(withId);
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -297,6 +318,19 @@ app.put("/api/admin/templates/:id", maybeRequireAdmin, async (req, res) => {
     ];
     for (const key of allowed) {
       if (body[key] !== undefined) doc.set(key, body[key]);
+    }
+    // Keep top-level preview/front/back in sync with nested template (same as POST create). Shop list uses
+    // top-level `preview` when `template` is stripped from GET /api/templates.
+    if (body.template !== undefined) {
+      const tb = doc.template;
+      if (tb && typeof tb === "object") {
+        const previewRef = tb.previewImage || tb.thumbnailImage || "";
+        const frontRef = tb.front && tb.front.backgroundImage ? tb.front.backgroundImage : "";
+        const backRef = tb.back && tb.back.backgroundImage ? tb.back.backgroundImage : "";
+        if (body.preview === undefined && previewRef) doc.set("preview", previewRef);
+        if (body.front === undefined && frontRef) doc.set("front", frontRef);
+        if (body.back === undefined && backRef) doc.set("back", backRef);
+      }
     }
     await doc.save();
     const out = doc.toObject();
