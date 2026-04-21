@@ -26,8 +26,8 @@ export function getAllOrders(filters = {}) {
 /** Paginated slice for admin list (same filters as getAllOrders). */
 export function getOrdersPage(filters = {}) {
   const page = Math.max(1, parseInt(String(filters.page ?? 1), 10) || 1);
-  const limitRaw = parseInt(String(filters.limit ?? 20), 10);
-  const limit = Math.min(100, Math.max(1, Number.isFinite(limitRaw) && limitRaw > 0 ? limitRaw : 20));
+  const limitRaw = parseInt(String(filters.limit ?? 10), 10);
+  const limit = Math.min(100, Math.max(1, Number.isFinite(limitRaw) && limitRaw > 0 ? limitRaw : 10));
   const list = getAllOrders({
     status: filters.status,
     email: filters.email,
