@@ -123,6 +123,12 @@ function escapeRegex(s) {
   return String(s).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
+/** Express may give query as string or string[] when repeated (?page=1&page=2). */
+function firstQueryParam(q) {
+  if (q == null) return undefined;
+  return Array.isArray(q) ? q[0] : q;
+}
+
 app.get("/api/templates", async (req, res) => {
   try {
     if (!dbConnected()) {
@@ -551,8 +557,8 @@ app.delete("/api/admin/subcategories/:id", maybeRequireAdmin, async (req, res) =
 // ---------- Admin: Orders (protected when DB) ----------
 app.get("/api/admin/orders", maybeRequireAdmin, async (req, res) => {
   try {
-    const page = Math.max(1, parseInt(String(req.query.page ?? "1"), 10) || 1);
-    const limitRaw = parseInt(String(req.query.limit ?? "20"), 10);
+    const page = Math.max(1, parseInt(String(firstQueryParam(req.query.page) ?? "1"), 10) || 1);
+    const limitRaw = parseInt(String(firstQueryParam(req.query.limit) ?? "20"), 10);
     const limit = Math.min(100, Math.max(1, Number.isFinite(limitRaw) && limitRaw > 0 ? limitRaw : 20));
     const status = req.query.status ? String(req.query.status).trim() : "";
     const email = req.query.email ? String(req.query.email).trim() : "";
