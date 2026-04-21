@@ -8,7 +8,7 @@
 - **When:** Once per environment (local already done; run once on live if the DB has old ids).
 - **From server directory:**
   ```bash
-  cd /path/to/api.customsportscards.live/server
+  cd /path/to/api.customsportscards.com/server
   node scripts/migrate-categories-to-url-ids.js
   ```
 - **From project root:**
@@ -26,7 +26,7 @@ If this folder was not copied to live, copy at least `server/scripts/migrate-cat
 - **What it does:** Sets each template’s `id` and `templateId` to a URL-safe slug derived from the template name (e.g. "Swimming Trading Card 01" → `swimming-trading-card-01`). Templates that already have a slug are skipped. Old UUIDs are stored in `legacyIds` so existing UUID links still work.
 - **From server directory:**
   ```bash
-  cd /path/to/api.customsportscards.live/server
+  cd /path/to/api.customsportscards.com/server
   node scripts/backfill-template-slugs.js
   ```
 - **From project root:**
