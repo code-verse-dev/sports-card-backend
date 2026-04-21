@@ -17,6 +17,7 @@ import { listCategories, listSubcategories, upsertCategory, upsertSubcategory, d
 import { DEFAULT_CATEGORIES, DEFAULT_SUBCATEGORIES } from "./seed-categories.js";
 import {
   getAllOrders,
+  getOrdersPage,
   getOrderById,
   createOrder,
   updateOrderStatus,
@@ -26,6 +27,8 @@ import {
 import { getPrices, setPrices } from "./store/prices.js";
 import { Order } from "./models/Order.js";
 import { Template } from "./models/Template.js";
+import { Category } from "./models/Category.js";
+import { Subcategory } from "./models/Subcategory.js";
 import { getPriceConfig, setPriceConfig } from "./models/PriceConfig.js";
 import { AdminUser, hashPassword } from "./models/AdminUser.js";
 import { sendOrderStatusChangedCustomerEmail, sendTrackingInfoCustomerEmail } from "./services/orderEmails.js";
@@ -548,19 +551,34 @@ app.delete("/api/admin/subcategories/:id", maybeRequireAdmin, async (req, res) =
 // ---------- Admin: Orders (protected when DB) ----------
 app.get("/api/admin/orders", maybeRequireAdmin, async (req, res) => {
   try {
+    const page = Math.max(1, parseInt(String(req.query.page ?? "1"), 10) || 1);
+    const limitRaw = parseInt(String(req.query.limit ?? "20"), 10);
+    const limit = Math.min(100, Math.max(1, Number.isFinite(limitRaw) && limitRaw > 0 ? limitRaw : 20));
+    const status = req.query.status ? String(req.query.status).trim() : "";
+    const email = req.query.email ? String(req.query.email).trim() : "";
+
     if (dbConnected()) {
-      const status = req.query.status;
-      const email = req.query.email;
-      let list = await Order.find().sort({ createdAt: -1 }).lean();
-      if (status) list = list.filter((o) => o.status === status);
+      const filter = {};
+      if (status) filter.status = status;
       if (email) {
-        const q = String(email).toLowerCase();
-        list = list.filter((o) => (o.customer?.email || "").toLowerCase().includes(q));
+        filter["customer.email"] = new RegExp(escapeRegex(email), "i");
       }
-      return res.json(list.map((o) => ({ ...o, id: o._id.toString() })));
+      const skip = (page - 1) * limit;
+      const [total, docs] = await Promise.all([
+        Order.countDocuments(filter),
+        Order.find(filter).sort({ createdAt: -1 }).skip(skip).limit(limit).lean(),
+      ]);
+      const orders = docs.map((o) => ({ ...o, id: o._id.toString() }));
+      const totalPages = Math.max(1, Math.ceil(total / limit));
+      return res.json({ orders, total, page, limit, totalPages });
     }
-    const list = getAllOrders({ status: req.query.status, email: req.query.email });
-    res.json(list);
+    const payload = getOrdersPage({
+      status: status || undefined,
+      email: email || undefined,
+      page,
+      limit,
+    });
+    return res.json(payload);
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
@@ -646,8 +664,19 @@ app.get("/api/admin/order-statuses", (req, res) => {
 app.get("/api/admin/stats", maybeRequireAdmin, async (req, res) => {
   try {
     const paidStatuses = ["confirmed", "in_production", "shipped", "delivered"];
+    const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
     if (dbConnected()) {
-      const [totalOrders, byStatus, revenueResult, ordersLast7Days] = await Promise.all([
+      const [
+        totalOrders,
+        byStatus,
+        revenueResult,
+        ordersLast7DaysAgg,
+        paidOrderCount,
+        revenueLast7DaysAgg,
+        totalTemplates,
+        categoriesCount,
+        subcategoriesCount,
+      ] = await Promise.all([
         Order.countDocuments(),
         Order.aggregate([{ $group: { _id: "$status", count: { $sum: 1 } } }]),
         Order.aggregate([
@@ -655,13 +684,7 @@ app.get("/api/admin/stats", maybeRequireAdmin, async (req, res) => {
           { $group: { _id: null, total: { $sum: { $add: ["$totalCents", { $ifNull: ["$shippingCents", 0] }] } } } },
         ]),
         Order.aggregate([
-          {
-            $match: {
-              createdAt: {
-                $gte: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000),
-              },
-            },
-          },
+          { $match: { createdAt: { $gte: sevenDaysAgo } } },
           {
             $group: {
               _id: { $dateToString: { format: "%Y-%m-%d", date: "$createdAt" } },
@@ -670,23 +693,53 @@ app.get("/api/admin/stats", maybeRequireAdmin, async (req, res) => {
           },
           { $sort: { _id: 1 } },
         ]),
+        Order.countDocuments({ status: { $in: paidStatuses } }),
+        Order.aggregate([
+          {
+            $match: {
+              createdAt: { $gte: sevenDaysAgo },
+              status: { $in: paidStatuses },
+            },
+          },
+          {
+            $group: {
+              _id: { $dateToString: { format: "%Y-%m-%d", date: "$createdAt" } },
+              revenueCents: { $sum: { $add: ["$totalCents", { $ifNull: ["$shippingCents", 0] }] } },
+            },
+          },
+          { $sort: { _id: 1 } },
+        ]),
+        Template.countDocuments(),
+        Category.countDocuments(),
+        Subcategory.countDocuments(),
       ]);
       const ordersByStatus = {};
       byStatus.forEach((x) => { ordersByStatus[x._id] = x.count; });
       const totalRevenueCents = revenueResult[0]?.total ?? 0;
+      const avgOrderValueCents =
+        paidOrderCount > 0 ? Math.round(totalRevenueCents / paidOrderCount) : 0;
       const last7Days = [];
+      const revenueLast7Days = [];
       for (let i = 6; i >= 0; i--) {
         const d = new Date();
         d.setDate(d.getDate() - i);
         const dateStr = d.toISOString().slice(0, 10);
-        const found = ordersLast7Days.find((x) => x._id === dateStr);
+        const found = ordersLast7DaysAgg.find((x) => x._id === dateStr);
         last7Days.push({ date: dateStr, count: found ? found.count : 0 });
+        const revFound = revenueLast7DaysAgg.find((x) => x._id === dateStr);
+        revenueLast7Days.push({ date: dateStr, revenueCents: revFound ? revFound.revenueCents : 0 });
       }
       return res.json({
         totalOrders,
         ordersByStatus,
         totalRevenueCents,
         ordersLast7Days: last7Days,
+        revenueLast7Days,
+        paidOrderCount,
+        avgOrderValueCents,
+        totalTemplates,
+        categoriesCount,
+        subcategoriesCount,
       });
     }
     const list = getAllOrders();
@@ -699,15 +752,36 @@ app.get("/api/admin/stats", maybeRequireAdmin, async (req, res) => {
         totalRevenueCents += (o.totalCents || 0) + (o.shippingCents || 0);
       }
     });
-    const ordersLast7Days = [];
+    const paidOrderCount = list.filter((o) => paidStatuses.includes(o.status)).length;
+    const avgOrderValueCents =
+      paidOrderCount > 0 ? Math.round(totalRevenueCents / paidOrderCount) : 0;
+    const ordersLast7DaysList = [];
+    const revenueLast7DaysList = [];
     for (let i = 6; i >= 0; i--) {
       const d = new Date();
       d.setDate(d.getDate() - i);
       const dateStr = d.toISOString().slice(0, 10);
       const count = list.filter((o) => o.createdAt && o.createdAt.startsWith(dateStr)).length;
-      ordersLast7Days.push({ date: dateStr, count });
+      ordersLast7DaysList.push({ date: dateStr, count });
+      let rev = 0;
+      list.forEach((o) => {
+        if (!paidStatuses.includes(o.status) || !o.createdAt || !o.createdAt.startsWith(dateStr)) return;
+        rev += (o.totalCents || 0) + (o.shippingCents || 0);
+      });
+      revenueLast7DaysList.push({ date: dateStr, revenueCents: rev });
     }
-    res.json({ totalOrders, ordersByStatus, totalRevenueCents, ordersLast7Days });
+    res.json({
+      totalOrders,
+      ordersByStatus,
+      totalRevenueCents,
+      ordersLast7Days: ordersLast7DaysList,
+      revenueLast7Days: revenueLast7DaysList,
+      paidOrderCount,
+      avgOrderValueCents,
+      totalTemplates: 0,
+      categoriesCount: 0,
+      subcategoriesCount: 0,
+    });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }

@@ -100,10 +100,10 @@ export async function buildOrderPrintPdfBuffer(order) {
       try {
         if (images.length === 0) {
           doc.addPage();
-          doc.fontSize(16).fillColor("#043264").text("Custom Sports Cards — print pack", { align: "center" });
+          doc.fontSize(16).fillColor("#b14d5c").text("Custom Sports Cards — photo pack (uploads)", { align: "center" });
           doc.moveDown();
           doc.fontSize(11).fillColor("#333").text(
-            `Order ${orderId}\n\nNo embedded images were found in this order (uploaded photos appear in the creator snapshot). Use the admin order page for live card preview, or ensure customer images are saved in the design.`,
+            `Order ${orderId}\n\nNo embedded upload images were found in this order snapshot. For the full composed card (front & back), use Admin → Orders → open order → Download full card PDF.`,
             { align: "left" }
           );
         } else {
