@@ -22,6 +22,8 @@ import {
   createOrder,
   updateOrderStatus,
   updateOrder,
+  deleteOrderById,
+  deleteAllOrders,
   ORDER_STATUSES,
 } from "./store/orders.js";
 import { getPrices, setPrices } from "./store/prices.js";
@@ -659,6 +661,46 @@ app.patch("/api/admin/orders/:id", maybeRequireAdmin, async (req, res) => {
     res.json(updated);
   } catch (e) {
     res.status(500).json({ error: e.message });
+  }
+});
+
+/** Delete every order (admin only). Requires JSON body: { "confirm": "delete-all-orders" }. */
+app.delete("/api/admin/orders", maybeRequireAdmin, async (req, res) => {
+  try {
+    const body = req.body || {};
+    if (String(body.confirm || "").trim() !== "delete-all-orders") {
+      return res.status(400).json({
+        error: 'Send JSON body: { "confirm": "delete-all-orders" }',
+      });
+    }
+    if (dbConnected()) {
+      const result = await Order.deleteMany({});
+      return res.json({ deletedCount: result.deletedCount ?? 0 });
+    }
+    const n = deleteAllOrders();
+    return res.json({ deletedCount: n });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.delete("/api/admin/orders/:id", maybeRequireAdmin, async (req, res) => {
+  try {
+    const id = (req.params.id || "").trim();
+    if (!id) return res.status(400).json({ error: "Missing order id" });
+    if (dbConnected()) {
+      const deleted = await Order.findByIdAndDelete(id);
+      if (!deleted) return res.status(404).json({ error: "Order not found" });
+      return res.status(204).send();
+    }
+    if (!deleteOrderById(id)) return res.status(404).json({ error: "Order not found" });
+    return res.status(204).send();
+  } catch (e) {
+    const msg = e?.message || String(e);
+    if (e?.name === "CastError" || /Cast to ObjectId failed/i.test(msg)) {
+      return res.status(400).json({ error: "Invalid order id" });
+    }
+    res.status(500).json({ error: msg });
   }
 });
 

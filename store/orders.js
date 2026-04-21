@@ -72,3 +72,18 @@ export function updateOrder(id, updates) {
   Object.assign(order, updates, { updatedAt: new Date().toISOString() });
   return order;
 }
+
+/** Remove order from in-memory store. Returns true if an order was removed. */
+export function deleteOrderById(id) {
+  const idx = orders.findIndex((o) => o.id === id);
+  if (idx === -1) return false;
+  orders.splice(idx, 1);
+  return true;
+}
+
+/** Remove every order from the in-memory store. Returns how many were removed. */
+export function deleteAllOrders() {
+  const n = orders.length;
+  orders.length = 0;
+  return n;
+}
