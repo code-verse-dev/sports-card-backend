@@ -558,8 +558,8 @@ app.delete("/api/admin/subcategories/:id", maybeRequireAdmin, async (req, res) =
 app.get("/api/admin/orders", maybeRequireAdmin, async (req, res) => {
   try {
     const page = Math.max(1, parseInt(String(firstQueryParam(req.query.page) ?? "1"), 10) || 1);
-    const limitRaw = parseInt(String(firstQueryParam(req.query.limit) ?? "20"), 10);
-    const limit = Math.min(100, Math.max(1, Number.isFinite(limitRaw) && limitRaw > 0 ? limitRaw : 20));
+    const limitRaw = parseInt(String(firstQueryParam(req.query.limit) ?? "10"), 10);
+    const limit = Math.min(100, Math.max(1, Number.isFinite(limitRaw) && limitRaw > 0 ? limitRaw : 10));
     const status = req.query.status ? String(req.query.status).trim() : "";
     const email = req.query.email ? String(req.query.email).trim() : "";
 
