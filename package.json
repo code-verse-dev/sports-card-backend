@@ -9,7 +9,8 @@
     "dev": "node --watch index.js",
     "migrate:categories": "node scripts/migrate-categories-to-url-ids.js",
     "smtp:test": "node scripts/smtp-test.js",
-    "email:scenarios": "node scripts/email-scenarios-test.js"
+    "email:scenarios": "node scripts/email-scenarios-test.js",
+    "email:test-admin-last-order": "node scripts/send-test-admin-last-order-email.js"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",

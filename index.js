@@ -37,6 +37,7 @@ import { AdminUser, hashPassword } from "./models/AdminUser.js";
 import { CustomerUser, hashCustomerPassword } from "./models/CustomerUser.js";
 import { sendOrderStatusChangedCustomerEmail, sendTrackingInfoCustomerEmail } from "./services/orderEmails.js";
 import { getOrderCustomerView } from "./services/orderCustomer.js";
+import { filterItemsForAdminEmailCardPdf, filterItemsForCustomerEmailCardPdf } from "./services/orderCardPdfExportMeta.js";
 import { profileFromBody, setCustomerPasswordById } from "./services/customerProfile.js";
 import {
   ensureUniqueOrderCode,
@@ -471,8 +472,9 @@ function orderPdfJwtSecret() {
 }
 
 /**
- * Used only by the storefront worker page (Puppeteer) to load cart line items for full-card PDF generation.
- * Query: token (JWT with typ order-card-pdf, orderId).
+ * Used only by the storefront worker page (Puppeteer) to load order rows for full-card PDF generation.
+ * Query: token (JWT: typ order-card-pdf, orderId, purpose email-admin | email-customer).
+ * Response: { pdfItemRows: [{ item, nominalInches }], pdfExport: { layout } } — email sizing only; admin UI download is unchanged.
  */
 app.get("/api/orders/internal/order-items-for-pdf", async (req, res) => {
   try {
@@ -490,9 +492,17 @@ app.get("/api/orders/internal/order-items-for-pdf", async (req, res) => {
     if (payload.typ !== "order-card-pdf" || !payload.orderId) {
       return res.status(401).json({ error: "Invalid token" });
     }
+    const purpose = payload.purpose === "email-customer" ? "email-customer" : "email-admin";
     const order = await Order.findById(payload.orderId).select("items").lean();
     if (!order) return res.status(404).json({ error: "Order not found" });
-    res.json({ items: order.items || [] });
+    const { pdfItemRows } =
+      purpose === "email-customer"
+        ? filterItemsForCustomerEmailCardPdf(order.items || [])
+        : filterItemsForAdminEmailCardPdf(order.items || []);
+    res.json({
+      pdfItemRows,
+      pdfExport: { layout: purpose },
+    });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }

@@ -192,7 +192,7 @@ export async function sendOrderPlacedCustomerEmail(order, opts = {}) {
   const pdfAttached = Boolean(wantsPdf && fullCardPdfBuffer);
   const pdfNote = wantsPdf
     ? pdfAttached
-      ? `<p style="margin:16px 0 0;font-size:14px;color:#475569;">Your <strong>printable card PDF</strong> (front and back for each custom design) is attached to this message.</p>`
+      ? `<p style="margin:16px 0 0;font-size:14px;color:#475569;">Your <strong>printable card PDF</strong> is attached: front and back for each design where you added the PDF option, at the <strong>print size you chose</strong> for that line.</p>`
       : `<p style="margin:16px 0 0;font-size:14px;color:#475569;">You added the <strong>digital PDF</strong> option. We could not attach the file automatically; reply to this email or contact support with order <strong>#${esc(ref)}</strong> and we will send your PDF.</p>`
     : "";
   const preheader = `Your order #${ref} is confirmed — thank you for choosing ${getMailBrandName()}.`;
@@ -221,11 +221,19 @@ export async function sendOrderPlacedCustomerEmail(order, opts = {}) {
 
 /**
  * @param {import('mongoose').Document | object} order
- * @param {{ fullCardPdfBuffer?: Buffer | null }} [opts]
+ * @param {{ fullCardPdfBuffer?: Buffer | null; subjectPrefix?: string; sendTo?: string }} [opts]
+ * When `sendTo` is set (comma-separated ok), that list is used instead of ADMIN_EMAIL / ADMIN_NOTIFICATION_EMAILS (e.g. QA scripts).
  */
 export async function sendOrderPlacedAdminEmail(order, opts = {}) {
-  const { fullCardPdfBuffer } = opts;
-  const admins = getAdminNotificationEmails();
+  const { fullCardPdfBuffer, subjectPrefix, sendTo } = opts;
+  const subjPre = subjectPrefix != null && String(subjectPrefix).trim() ? String(subjectPrefix).trim() + " " : "";
+  const rawOverride = sendTo != null ? String(sendTo).trim() : "";
+  const admins = rawOverride
+    ? rawOverride
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean)
+    : getAdminNotificationEmails();
   if (admins.length === 0) {
     console.warn("[orderEmails] ADMIN_EMAIL / ADMIN_NOTIFICATION_EMAILS not set — skipping admin notification");
     return;
@@ -251,9 +259,9 @@ export async function sendOrderPlacedAdminEmail(order, opts = {}) {
     ? `<p style="margin:16px 0 0;">${emailButton(adminUrl, "Open orders in admin")}</p>`
     : "";
   const attachNote = fullCardPdfBuffer
-    ? `<p style="margin:16px 0 0;font-size:14px;color:#475569;">Attached: <strong>full card PDF</strong> (composed front &amp; back per design), same as Admin → Download card PDF.</p>`
+    ? `<p style="margin:16px 0 0;font-size:14px;color:#475569;">Attached: <strong>full card PDF</strong> for fulfillment — each page is a <strong>2.75″×3.75″</strong> canvas (composed front &amp; back per design). Admin download in the app still uses the original builder sizing.</p>`
     : fallbackSnapshotPdf
-      ? `<p style="margin:16px 0 0;font-size:14px;color:#475569;">Attached: <strong>snapshot PDF</strong> (raw upload images from the order). Full composed cards: open the order in admin and use Download card PDF, or set PUBLIC_APP_URL and install Puppeteer on the API server for automatic full-card PDFs.</p>`
+      ? `<p style="margin:16px 0 0;font-size:14px;color:#475569;"><strong>Attached PDF is upload photos only</strong> — one page per customer image file, <em>not</em> the finished card (no template frame, text, or layout). That attachment appears when automatic full-card rendering did not run. For composed front &amp; back: Admin → Orders → open this order → <strong>Download card PDF</strong>. To get composed cards in email automatically: set <code>PUBLIC_APP_URL</code> (live storefront), <code>JWT_SECRET</code>, install Puppeteer on this server, and build the storefront with <code>VITE_API_URL</code> pointing at this API so headless Chrome can load uploads.</p>`
       : `<p style="margin:16px 0 0;font-size:14px;color:#475569;">No PDF attached (no design snapshot images and headless card PDF unavailable).</p>`;
   const bodyHtml = `
     <p style="margin:0 0 8px;font-size:13px;font-weight:600;letter-spacing:0.06em;text-transform:uppercase;color:#94a3b8;">Fulfillment</p>
@@ -274,14 +282,20 @@ export async function sendOrderPlacedAdminEmail(order, opts = {}) {
   if (fullCardPdfBuffer) {
     attachments.push({ filename: `order-${ref}-full-card.pdf`, content: fullCardPdfBuffer, contentType: "application/pdf" });
   } else if (fallbackSnapshotPdf) {
-    attachments.push({ filename: `order-${ref}-uploads-snapshot.pdf`, content: fallbackSnapshotPdf, contentType: "application/pdf" });
+    attachments.push({
+      filename: `order-${ref}-upload-photos-only.pdf`,
+      content: fallbackSnapshotPdf,
+      contentType: "application/pdf",
+    });
   }
-  const subj = fullCardPdfBuffer
-    ? `[${brand}] New order #${ref} — full card PDF attached`
-    : fallbackSnapshotPdf
-      ? `[${brand}] New order #${ref} — snapshot PDF attached`
-      : `[${brand}] New order #${ref}`;
-  await sendMailMessage({
+  const subj =
+    subjPre +
+    (fullCardPdfBuffer
+      ? `[${brand}] New order #${ref} — full card PDF attached`
+      : fallbackSnapshotPdf
+        ? `[${brand}] New order #${ref} — upload images only (not composed cards)`
+        : `[${brand}] New order #${ref}`);
+  return await sendMailMessage({
     to: admins,
     subject: subj,
     html: wrapEmailHtml({ preheader, bodyHtml }),
@@ -309,20 +323,31 @@ export async function notifyOrderPlaced(order) {
     .lean();
   if (!full) return;
   const merged = { ...full, id: full._id?.toString() };
-  let fullCardPdfBuffer = null;
+  const wantsCustomerPdf = orderIncludesPurchasedPdf(merged);
+  let adminCardPdfBuffer = null;
+  let customerCardPdfBuffer = null;
   try {
-    fullCardPdfBuffer = await buildFullOrderCardPdfBufferHeadless(id);
+    const adminTask = buildFullOrderCardPdfBufferHeadless(id, { purpose: "email-admin" }).catch((e) => {
+      console.error("[orderEmails] Headless admin email card PDF failed:", e?.message || e);
+      return null;
+    });
+    const customerTask = wantsCustomerPdf
+      ? buildFullOrderCardPdfBufferHeadless(id, { purpose: "email-customer" }).catch((e) => {
+          console.error("[orderEmails] Headless customer email card PDF failed:", e?.message || e);
+          return null;
+        })
+      : Promise.resolve(null);
+    [adminCardPdfBuffer, customerCardPdfBuffer] = await Promise.all([adminTask, customerTask]);
   } catch (e) {
-    console.error("[orderEmails] Headless full card PDF failed:", e?.message || e);
-    fullCardPdfBuffer = null;
+    console.error("[orderEmails] Headless order PDF batch failed:", e?.message || e);
   }
   try {
-    await sendOrderPlacedCustomerEmail(merged, { fullCardPdfBuffer });
+    await sendOrderPlacedCustomerEmail(merged, { fullCardPdfBuffer: customerCardPdfBuffer });
   } catch (e) {
     console.error("[orderEmails] Customer order email failed:", e.message);
   }
   try {
-    await sendOrderPlacedAdminEmail(merged, { fullCardPdfBuffer });
+    await sendOrderPlacedAdminEmail(merged, { fullCardPdfBuffer: adminCardPdfBuffer });
   } catch (e) {
     console.error("[orderEmails] Admin order email failed:", e.message);
   }
