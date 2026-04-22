@@ -39,3 +39,6 @@ uploads
 
 # Keep scripts/ tracked (migration scripts must be deployed)
 !scripts/
+
+# Local QA output (may contain customer designs)
+scripts/last-order-admin-email-preview.pdf

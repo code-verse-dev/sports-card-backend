@@ -122,16 +122,27 @@ export async function sendMailMessage(opts) {
   const transporter = getTransport();
   const from = getMailFrom();
   const replyTo = (process.env.SUPPORT_EMAIL || process.env.MAIL_REPLY_TO || "").trim();
+  const toField = Array.isArray(opts.to) ? opts.to.filter(Boolean).join(", ") : String(opts.to || "").trim();
+  if (!toField) {
+    console.warn("[mail] Skipping send: empty `to`");
+    return { skipped: true, reason: "empty-to" };
+  }
   const result = await transporter.sendMail({
     from,
     ...(replyTo ? { replyTo } : {}),
-    to: opts.to,
+    to: toField,
     subject: opts.subject,
     html: opts.html,
     text: opts.text,
     attachments: opts.attachments,
   });
-  return { messageId: result.messageId };
+  const accepted = result.accepted?.length ? result.accepted : [toField];
+  const rejected = result.rejected?.length ? result.rejected : [];
+  console.log("[mail] Sent", { messageId: result.messageId, to: toField, accepted, rejected });
+  if (rejected.length) {
+    console.warn("[mail] Some recipients were rejected by SMTP:", rejected);
+  }
+  return { messageId: result.messageId, accepted, rejected };
 }
 
 /** Comma-separated ADMIN_EMAIL or ADMIN_NOTIFICATION_EMAILS */
