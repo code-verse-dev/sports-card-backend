@@ -76,7 +76,7 @@ const maybeRequireAdmin = (req, res, next) => {
 
 // ----- Helpers when using DB -----
 const CUSTOMER_ID_POPULATE_SELECT =
-  "email firstName lastName phone company address addressLine2 city state zip country createdAt publicId";
+  "email firstName lastName phone address addressLine2 city state zip country createdAt publicId";
 
 function orderToJson(doc) {
   if (!doc) return null;
@@ -645,7 +645,6 @@ function customerUserToJson(doc) {
     firstName: o.firstName,
     lastName: o.lastName,
     phone: o.phone,
-    company: o.company,
     address: o.address,
     addressLine2: o.addressLine2,
     city: o.city,
@@ -669,7 +668,7 @@ app.get("/api/admin/customers", maybeRequireAdmin, async (req, res) => {
     const filter = {};
     if (q) {
       const re = new RegExp(escapeRegex(q), "i");
-      filter.$or = [{ email: re }, { firstName: re }, { lastName: re }, { phone: re }, { company: re }, { publicId: re }];
+      filter.$or = [{ email: re }, { firstName: re }, { lastName: re }, { phone: re }, { publicId: re }];
     }
     const [total, docs] = await Promise.all([
       CustomerUser.countDocuments(filter),
@@ -750,7 +749,6 @@ app.post("/api/admin/customers", maybeRequireAdmin, async (req, res) => {
       firstName: p.firstName,
       lastName: p.lastName,
       phone: p.phone,
-      company: p.company,
       address: p.address,
       addressLine2: p.addressLine2,
       city: p.city,
@@ -791,7 +789,6 @@ app.patch("/api/admin/customers/:id", maybeRequireAdmin, async (req, res) => {
     if (body.firstName !== undefined) u.firstName = str("firstName");
     if (body.lastName !== undefined) u.lastName = str("lastName");
     if (body.phone !== undefined) u.phone = str("phone");
-    if (body.company !== undefined) u.company = str("company");
     if (body.address !== undefined) u.address = str("address");
     if (body.addressLine2 !== undefined) u.addressLine2 = str("addressLine2");
     if (body.city !== undefined) u.city = str("city");

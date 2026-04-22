@@ -39,7 +39,6 @@ function buildOrderCustomer(customer) {
     lastName: String(customer.lastName || "").trim() || undefined,
     phone: customer.phone ? String(customer.phone).trim() : undefined,
     address: customer.address ? String(customer.address).trim() : undefined,
-    company: customer.company ? String(customer.company).trim() : undefined,
     addressLine2: customer.addressLine2 ? String(customer.addressLine2).trim() : undefined,
     city: customer.city ? String(customer.city).trim() : undefined,
     state: customer.state ? String(customer.state).trim() : undefined,
@@ -82,6 +81,7 @@ function customerFromStripeBilling(bd) {
   if (bd.address?.state) out.state = String(bd.address.state).trim();
   if (bd.address?.postal_code) out.zip = String(bd.address.postal_code).trim();
   if (bd.address?.country) out.country = String(bd.address.country).trim();
+  if (bd.phone) out.phone = String(bd.phone).trim();
   return out;
 }
 
@@ -452,7 +452,7 @@ router.post("/confirm-payment", optionalCustomer, async (req, res) => {
 
     const orderForReceipt = await Order.findById(orderId).populate({
       path: "customerId",
-      select: "email firstName lastName phone company address addressLine2 city state zip country",
+      select: "email firstName lastName phone address addressLine2 city state zip country",
     });
     const custView = getOrderCustomerView(
       orderForReceipt ? orderForReceipt.toObject() : { customer: prevC, customerId: null }
