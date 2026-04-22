@@ -1,4 +1,5 @@
 import PDFDocument from "pdfkit";
+import { getOrderRef } from "./publicCodes.js";
 
 const UPLOAD_ID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -94,6 +95,7 @@ export async function buildOrderPrintPdfBuffer(order) {
     doc.on("end", () => resolve(Buffer.concat(chunks)));
     doc.on("error", reject);
 
+    const orderRef = getOrderRef(order);
     const orderId = order._id?.toString?.() ?? order.id ?? "";
 
     (async () => {
@@ -103,7 +105,7 @@ export async function buildOrderPrintPdfBuffer(order) {
           doc.fontSize(16).fillColor("#b14d5c").text("Custom Sports Cards — photo pack (uploads)", { align: "center" });
           doc.moveDown();
           doc.fontSize(11).fillColor("#333").text(
-            `Order ${orderId}\n\nNo embedded upload images were found in this order snapshot. For the full composed card (front & back), use Admin → Orders → open order → Download full card PDF.`,
+            `Order #${orderRef} (${orderId})\n\nNo embedded upload images were found in this order snapshot. For the full composed card (front & back), use Admin → Orders → open order → Download full card PDF.`,
             { align: "left" }
           );
         } else {

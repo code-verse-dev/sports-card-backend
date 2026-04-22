@@ -14,6 +14,10 @@ import {
   getAdminOrdersUrl,
 } from "./mail.js";
 import { buildOrderPrintPdfBuffer } from "./orderPdf.js";
+import { buildFullOrderCardPdfBufferHeadless } from "./orderCardPdfHeadless.js";
+import { getOrderCustomerView } from "./orderCustomer.js";
+import { getOrderRef } from "./publicCodes.js";
+import { Order } from "../models/Order.js";
 
 function esc(s) {
   return String(s ?? "")
@@ -26,6 +30,16 @@ function esc(s) {
 function formatMoney(cents) {
   const n = Number(cents) || 0;
   return `$${(n / 100).toFixed(2)}`;
+}
+
+/** True if the customer paid for the digital PDF add-on on any line. */
+function orderIncludesPurchasedPdf(order) {
+  const items = order.items || [];
+  for (const it of items) {
+    if (it.pdfOption) return true;
+    if (Array.isArray(it.lineItems) && it.lineItems.some((l) => l.pdfOption)) return true;
+  }
+  return false;
 }
 
 function myAccountUrl() {
@@ -152,7 +166,7 @@ function wrapEmailHtml({ preheader, bodyHtml }) {
 }
 
 function customerName(order) {
-  const c = order.customer || {};
+  const c = getOrderCustomerView(order);
   return [c.firstName, c.lastName].filter(Boolean).join(" ") || c.email || "there";
 }
 
@@ -166,76 +180,112 @@ function statusPill(text, highlight) {
 
 /**
  * @param {import('mongoose').Document | object} order
+ * @param {{ fullCardPdfBuffer?: Buffer | null }} [opts]
  */
-export async function sendOrderPlacedCustomerEmail(order) {
-  const email = order.customer?.email?.trim();
+export async function sendOrderPlacedCustomerEmail(order, opts = {}) {
+  const { fullCardPdfBuffer } = opts;
+  const email = getOrderCustomerView(order).email?.trim();
   if (!email) return;
-  const id = order._id?.toString?.() ?? order.id ?? "";
+  const ref = getOrderRef(order);
   const accent = getMailAccentColor();
-  const preheader = `Your order #${id.slice(-8)} is confirmed — thank you for choosing ${getMailBrandName()}.`;
+  const wantsPdf = orderIncludesPurchasedPdf(order);
+  const pdfAttached = Boolean(wantsPdf && fullCardPdfBuffer);
+  const pdfNote = wantsPdf
+    ? pdfAttached
+      ? `<p style="margin:16px 0 0;font-size:14px;color:#475569;">Your <strong>printable card PDF</strong> (front and back for each custom design) is attached to this message.</p>`
+      : `<p style="margin:16px 0 0;font-size:14px;color:#475569;">You added the <strong>digital PDF</strong> option. We could not attach the file automatically; reply to this email or contact support with order <strong>#${esc(ref)}</strong> and we will send your PDF.</p>`
+    : "";
+  const preheader = `Your order #${ref} is confirmed — thank you for choosing ${getMailBrandName()}.`;
   const bodyHtml = `
     <p style="margin:0 0 16px;font-size:17px;color:#0f172a;font-weight:600;">Hi ${esc(customerName(order))},</p>
     <p style="margin:0 0 20px;">Thank you for your order. We’ve received your payment and your custom cards are in our queue.</p>
     <p style="margin:0 0 8px;font-size:13px;font-weight:600;letter-spacing:0.06em;text-transform:uppercase;color:#94a3b8;">Order reference</p>
-    <p style="margin:0 0 4px;font-size:22px;font-weight:700;color:${accent};letter-spacing:-0.02em;">#${esc(id.slice(-8))}</p>
+    <p style="margin:0 0 4px;font-size:22px;font-weight:700;color:${accent};letter-spacing:-0.02em;">#${esc(ref)}</p>
     <p style="margin:0 0 8px;font-size:14px;color:#64748b;">Keep this number for your records.</p>
     ${orderSummaryBlock(order)}
+    ${pdfNote}
     <p style="margin:8px 0 0;">Track progress and details anytime in your account.</p>
     ${emailButton(myAccountUrl(), "View my orders")}
   `;
+  const attachments = pdfAttached
+    ? [{ filename: `order-${ref}-your-cards.pdf`, content: fullCardPdfBuffer, contentType: "application/pdf" }]
+    : [];
   await sendMailMessage({
     to: email,
-    subject: `Order received — #${id.slice(-8)}`,
+    subject: pdfAttached ? `Order received — #${ref} (PDF attached)` : `Order received — #${ref}`,
     html: wrapEmailHtml({ preheader, bodyHtml }),
-    text: `Hi ${customerName(order)}, we received your order #${id.slice(-8)}. Total ${formatMoney((order.totalCents ?? 0) + (order.shippingCents ?? 0))}. My orders: ${myAccountUrl()}`,
+    text: `Hi ${customerName(order)}, we received your order #${ref}. Total ${formatMoney((order.totalCents ?? 0) + (order.shippingCents ?? 0))}. My orders: ${myAccountUrl()}`,
+    attachments,
   });
 }
 
 /**
  * @param {import('mongoose').Document | object} order
+ * @param {{ fullCardPdfBuffer?: Buffer | null }} [opts]
  */
-export async function sendOrderPlacedAdminEmail(order) {
+export async function sendOrderPlacedAdminEmail(order, opts = {}) {
+  const { fullCardPdfBuffer } = opts;
   const admins = getAdminNotificationEmails();
   if (admins.length === 0) {
     console.warn("[orderEmails] ADMIN_EMAIL / ADMIN_NOTIFICATION_EMAILS not set — skipping admin notification");
     return;
   }
+  const ref = getOrderRef(order);
   const id = order._id?.toString?.() ?? order.id ?? "";
   const brand = getMailBrandName();
-  let pdfBuffer;
-  try {
-    pdfBuffer = await buildOrderPrintPdfBuffer(order);
-  } catch (e) {
-    console.error("[orderEmails] PDF build failed:", e.message);
-    pdfBuffer = null;
+  /** @type {Buffer | null} */
+  let fallbackSnapshotPdf = null;
+  if (!fullCardPdfBuffer) {
+    try {
+      fallbackSnapshotPdf = await buildOrderPrintPdfBuffer(order);
+    } catch (e) {
+      console.error("[orderEmails] Snapshot PDF build failed:", e.message);
+      fallbackSnapshotPdf = null;
+    }
   }
   const adminUrl = getAdminOrdersUrl();
-  const preheader = `New paid order #${id.slice(-8)} — ${order.customer?.email || ""}`;
+  const cView = getOrderCustomerView(order);
+  const custRef = cView.publicId ? `<p style="margin:8px 0 0;font-size:12px;color:#64748b;">Customer ID <strong style="color:#0f172a;font-family:ui-monospace,monospace;">${esc(cView.publicId)}</strong></p>` : "";
+  const preheader = `New paid order #${ref} — ${cView.email || ""}`;
   const adminCta = adminUrl
     ? `<p style="margin:16px 0 0;">${emailButton(adminUrl, "Open orders in admin")}</p>`
     : "";
+  const attachNote = fullCardPdfBuffer
+    ? `<p style="margin:16px 0 0;font-size:14px;color:#475569;">Attached: <strong>full card PDF</strong> (composed front &amp; back per design), same as Admin → Download card PDF.</p>`
+    : fallbackSnapshotPdf
+      ? `<p style="margin:16px 0 0;font-size:14px;color:#475569;">Attached: <strong>snapshot PDF</strong> (raw upload images from the order). Full composed cards: open the order in admin and use Download card PDF, or set PUBLIC_APP_URL and install Puppeteer on the API server for automatic full-card PDFs.</p>`
+      : `<p style="margin:16px 0 0;font-size:14px;color:#475569;">No PDF attached (no design snapshot images and headless card PDF unavailable).</p>`;
   const bodyHtml = `
     <p style="margin:0 0 8px;font-size:13px;font-weight:600;letter-spacing:0.06em;text-transform:uppercase;color:#94a3b8;">Fulfillment</p>
-    <p style="margin:0 0 16px;font-size:20px;font-weight:700;color:#0f172a;">New paid order <span style="color:${getMailAccentColor()};">#${esc(id.slice(-8))}</span></p>
+    <p style="margin:0 0 16px;font-size:20px;font-weight:700;color:#0f172a;">New paid order <span style="color:${getMailAccentColor()};">#${esc(ref)}</span></p>
     <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 20px;width:100%;background:#f8fafc;border-radius:12px;border:1px solid #e2e8f0;">
       <tr><td style="padding:16px 18px;font-family:Segoe UI,Roboto,Helvetica,Arial,sans-serif;font-size:14px;">
         <strong style="color:#64748b;display:block;margin-bottom:6px;">Customer</strong>
-        ${esc(order.customer?.email)}<br/>
-        <span style="color:#334155;">${esc([order.customer?.firstName, order.customer?.lastName].filter(Boolean).join(" "))}</span>
+        ${esc(cView.email)}<br/>
+        <span style="color:#334155;">${esc([cView.firstName, cView.lastName].filter(Boolean).join(" "))}</span>
+        ${custRef}
       </td></tr>
     </table>
     ${orderSummaryBlock(order)}
-    <p style="margin:16px 0 0;font-size:14px;color:#475569;">A <strong>print PDF</strong> is attached when design images are present in the order snapshot.</p>
+    ${attachNote}
     ${adminCta}
   `;
-  const attachments = pdfBuffer
-    ? [{ filename: `order-${id.slice(-8)}-print.pdf`, content: pdfBuffer, contentType: "application/pdf" }]
-    : [];
+  const attachments = [];
+  if (fullCardPdfBuffer) {
+    attachments.push({ filename: `order-${ref}-full-card.pdf`, content: fullCardPdfBuffer, contentType: "application/pdf" });
+  } else if (fallbackSnapshotPdf) {
+    attachments.push({ filename: `order-${ref}-uploads-snapshot.pdf`, content: fallbackSnapshotPdf, contentType: "application/pdf" });
+  }
+  const subj = fullCardPdfBuffer
+    ? `[${brand}] New order #${ref} — full card PDF attached`
+    : fallbackSnapshotPdf
+      ? `[${brand}] New order #${ref} — snapshot PDF attached`
+      : `[${brand}] New order #${ref}`;
   await sendMailMessage({
     to: admins,
-    subject: `[${brand}] New order #${id.slice(-8)} — print pack attached`,
+    subject: subj,
     html: wrapEmailHtml({ preheader, bodyHtml }),
-    text: `New order ${id}. Customer ${order.customer?.email}. Admin: ${adminUrl || "(set PUBLIC_APP_URL)"}`,
+    text: `New order #${ref} (${id}). Customer ${cView.email || ""}${cView.publicId ? ` · ${cView.publicId}` : ""}. Admin: ${adminUrl || "(set PUBLIC_APP_URL)"}`,
     attachments,
   });
 }
@@ -249,13 +299,30 @@ export async function notifyOrderPlaced(order) {
     console.warn("[orderEmails] SMTP not configured — order emails skipped");
     return;
   }
+  const id = order._id?.toString() || order.id;
+  if (!id) return;
+  const full = await Order.findById(id)
+    .populate({
+      path: "customerId",
+      select: "email firstName lastName phone company address addressLine2 city state zip country publicId",
+    })
+    .lean();
+  if (!full) return;
+  const merged = { ...full, id: full._id?.toString() };
+  let fullCardPdfBuffer = null;
   try {
-    await sendOrderPlacedCustomerEmail(order);
+    fullCardPdfBuffer = await buildFullOrderCardPdfBufferHeadless(id);
+  } catch (e) {
+    console.error("[orderEmails] Headless full card PDF failed:", e?.message || e);
+    fullCardPdfBuffer = null;
+  }
+  try {
+    await sendOrderPlacedCustomerEmail(merged, { fullCardPdfBuffer });
   } catch (e) {
     console.error("[orderEmails] Customer order email failed:", e.message);
   }
   try {
-    await sendOrderPlacedAdminEmail(order);
+    await sendOrderPlacedAdminEmail(merged, { fullCardPdfBuffer });
   } catch (e) {
     console.error("[orderEmails] Admin order email failed:", e.message);
   }
@@ -276,12 +343,12 @@ const STATUS_LABELS = {
  * @param {string} previousStatus
  */
 export async function sendOrderStatusChangedCustomerEmail(order, previousStatus) {
-  const email = order.customer?.email?.trim();
+  const email = getOrderCustomerView(order).email?.trim();
   if (!email) return;
-  const id = order._id?.toString?.() ?? order.id ?? "";
+  const ref = getOrderRef(order);
   const prev = STATUS_LABELS[previousStatus] || previousStatus;
   const cur = STATUS_LABELS[order.status] || order.status;
-  const preheader = `Order #${id.slice(-8)}: ${prev} → ${cur}`;
+  const preheader = `Order #${ref}: ${prev} → ${cur}`;
   const bodyHtml = `
     <p style="margin:0 0 16px;font-size:17px;color:#0f172a;font-weight:600;">Hi ${esc(customerName(order))},</p>
     <p style="margin:0 0 20px;">We’ve updated the status of your order.</p>
@@ -292,7 +359,7 @@ export async function sendOrderStatusChangedCustomerEmail(order, previousStatus)
           <p style="margin:0 0 16px;font-size:15px;color:#475569;">
             ${statusPill(prev, false)} &nbsp;<span style="color:#cbd5e1;font-size:18px;">→</span>&nbsp; ${statusPill(cur, true)}
           </p>
-          <p style="margin:0;font-size:13px;color:#64748b;">Order <strong style="color:#0f172a;">#${esc(id.slice(-8))}</strong></p>
+          <p style="margin:0;font-size:13px;color:#64748b;">Order <strong style="color:#0f172a;">#${esc(ref)}</strong></p>
         </td>
       </tr>
     </table>
@@ -300,9 +367,9 @@ export async function sendOrderStatusChangedCustomerEmail(order, previousStatus)
   `;
   await sendMailMessage({
     to: email,
-    subject: `Order update — #${id.slice(-8)} (${cur})`,
+    subject: `Order update — #${ref} (${cur})`,
     html: wrapEmailHtml({ preheader, bodyHtml }),
-    text: `Order #${id.slice(-8)} status: ${prev} -> ${cur}. ${myAccountUrl()}`,
+    text: `Order #${ref} status: ${prev} -> ${cur}. ${myAccountUrl()}`,
   });
 }
 
@@ -328,15 +395,15 @@ function resolveTrackingUrl(order) {
  * @param {import('mongoose').Document | object} order
  */
 export async function sendTrackingInfoCustomerEmail(order) {
-  const email = order.customer?.email?.trim();
+  const email = getOrderCustomerView(order).email?.trim();
   if (!email) return;
   const num = order.trackingNumber?.trim();
   if (!num) return;
-  const id = order._id?.toString?.() ?? order.id ?? "";
+  const ref = getOrderRef(order);
   const trackUrl = resolveTrackingUrl(order);
   const accent = getMailAccentColor();
   const light = getMailAccentLight();
-  const preheader = `Tracking for order #${id.slice(-8)}: ${num}`;
+  const preheader = `Tracking for order #${ref}: ${num}`;
   const linkBlock = trackUrl
     ? emailButton(trackUrl, "Track your shipment")
     : `<p style="margin:20px 0 0;font-size:14px;color:#475569;">Use your carrier’s site with the number below.</p>`;
@@ -357,8 +424,8 @@ export async function sendTrackingInfoCustomerEmail(order) {
   `;
   await sendMailMessage({
     to: email,
-    subject: `Your shipment is on the way — #${id.slice(-8)}`,
+    subject: `Your shipment is on the way — #${ref}`,
     html: wrapEmailHtml({ preheader, bodyHtml }),
-    text: `Order #${id.slice(-8)} tracking: ${num}. ${trackUrl || ""} ${myAccountUrl()}`,
+    text: `Order #${ref} tracking: ${num}. ${trackUrl || ""} ${myAccountUrl()}`,
   });
 }
