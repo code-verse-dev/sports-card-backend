@@ -1,6 +1,7 @@
 import { Router } from "express";
 import mongoose from "mongoose";
 import { CustomerUser, hashCustomerPassword } from "../models/CustomerUser.js";
+import { resolveCustomerPublicDisplayId } from "../services/publicCodes.js";
 import { signToken, requireCustomer } from "../middleware/auth.js";
 import { dbConnected } from "../db.js";
 import { Order } from "../models/Order.js";
@@ -8,12 +9,25 @@ import { UserSavedDesign } from "../models/UserSavedDesign.js";
 
 const router = Router();
 
-/** POST /api/user/register - body: { email, password, firstName?, lastName? }. Creates customer account. */
+/** POST /api/user/register - body: { email, password, firstName?, lastName?, phone?, company?, address?, addressLine2?, city?, state?, zip?, country? }. Creates customer account. */
 router.post("/register", async (req, res) => {
   if (!dbConnected()) {
     return res.status(503).json({ error: "Registration is not available" });
   }
-  const { email, password, firstName, lastName } = req.body || {};
+  const {
+    email,
+    password,
+    firstName,
+    lastName,
+    phone,
+    company,
+    address,
+    addressLine2,
+    city,
+    state,
+    zip,
+    country,
+  } = req.body || {};
   const e = String(email || "").trim().toLowerCase();
   const p = String(password || "").trim();
   if (!e || !p) {
@@ -22,17 +36,48 @@ router.post("/register", async (req, res) => {
   if (p.length < 6) {
     return res.status(400).json({ error: "Password must be at least 6 characters" });
   }
-  const existing = await CustomerUser.findOne({ email: e });
-  if (existing) {
-    return res.status(409).json({ error: "An account with this email already exists" });
-  }
+  const opt = (v) => (v != null && String(v).trim() ? String(v).trim() : undefined);
   try {
+    const existing = await CustomerUser.findOne({ email: e }).select("+passwordHash");
+    if (existing?.passwordHash) {
+      return res.status(409).json({ error: "An account with this email already exists" });
+    }
+    if (existing) {
+      existing.passwordHash = await hashCustomerPassword(p);
+      if (opt(firstName) !== undefined) existing.firstName = opt(firstName);
+      if (opt(lastName) !== undefined) existing.lastName = opt(lastName);
+      if (opt(phone) !== undefined) existing.phone = opt(phone);
+      if (opt(company) !== undefined) existing.company = opt(company);
+      if (opt(address) !== undefined) existing.address = opt(address);
+      if (opt(addressLine2) !== undefined) existing.addressLine2 = opt(addressLine2);
+      if (opt(city) !== undefined) existing.city = opt(city);
+      if (opt(state) !== undefined) existing.state = opt(state);
+      if (opt(zip) !== undefined) existing.zip = opt(zip);
+      if (opt(country) !== undefined) existing.country = opt(country);
+      await existing.save();
+      return res.status(201).json({
+        message: "Account created",
+        user: {
+          email: existing.email,
+          firstName: existing.firstName,
+          lastName: existing.lastName,
+        },
+      });
+    }
     const passwordHash = await hashCustomerPassword(p);
     const user = await CustomerUser.create({
       email: e,
       passwordHash,
-      firstName: firstName != null ? String(firstName).trim() : undefined,
-      lastName: lastName != null ? String(lastName).trim() : undefined,
+      firstName: opt(firstName),
+      lastName: opt(lastName),
+      phone: opt(phone),
+      company: opt(company),
+      address: opt(address),
+      addressLine2: opt(addressLine2),
+      city: opt(city),
+      state: opt(state),
+      zip: opt(zip),
+      country: opt(country),
     });
     res.status(201).json({
       message: "Account created",
@@ -58,8 +103,8 @@ router.post("/login", async (req, res) => {
   if (!e || !p) {
     return res.status(400).json({ error: "Email and password required" });
   }
-  const user = await CustomerUser.findOne({ email: e });
-  if (!user) {
+  const user = await CustomerUser.findOne({ email: e }).select("+passwordHash");
+  if (!user || !user.passwordHash) {
     return res.status(401).json({ error: "Invalid email or password" });
   }
   const ok = await user.comparePassword(p);
@@ -83,6 +128,7 @@ router.get("/me", requireCustomer, (req, res) => {
   if (!u) return res.status(401).json({ error: "Unauthorized" });
   res.json({
     email: u.email,
+    publicId: resolveCustomerPublicDisplayId(u),
     firstName: u.firstName,
     lastName: u.lastName,
     phone: u.phone,
@@ -115,6 +161,7 @@ router.patch("/me", requireCustomer, async (req, res) => {
     await user.save();
     res.json({
       email: user.email,
+      publicId: resolveCustomerPublicDisplayId(user),
       firstName: user.firstName,
       lastName: user.lastName,
       phone: user.phone,
@@ -159,6 +206,7 @@ router.post("/change-password", requireCustomer, async (req, res) => {
 router.get("/orders", requireCustomer, async (req, res) => {
   try {
     if (!dbConnected()) {
+      console.warn("[orders] GET /api/user/orders 503: database not available");
       return res.status(503).json({ error: "Orders not available" });
     }
     const user = req.customerUser;
@@ -179,8 +227,10 @@ router.get("/orders", requireCustomer, async (req, res) => {
       ...o,
       id: o._id?.toString(),
     }));
+    console.log(`[orders] GET /api/user/orders count=${withId.length} userId=${user._id?.toString?.() || "unknown"}`);
     res.json(withId);
   } catch (e) {
+    console.error("[orders] GET /api/user/orders failed:", e?.message || e);
     res.status(500).json({ error: e.message });
   }
 });

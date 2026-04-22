@@ -33,8 +33,22 @@ import { Category } from "./models/Category.js";
 import { Subcategory } from "./models/Subcategory.js";
 import { getPriceConfig, setPriceConfig } from "./models/PriceConfig.js";
 import { AdminUser, hashPassword } from "./models/AdminUser.js";
+import { CustomerUser, hashCustomerPassword } from "./models/CustomerUser.js";
 import { sendOrderStatusChangedCustomerEmail, sendTrackingInfoCustomerEmail } from "./services/orderEmails.js";
+import { getOrderCustomerView } from "./services/orderCustomer.js";
+import { profileFromBody, setCustomerPasswordById } from "./services/customerProfile.js";
+import {
+  ensureUniqueOrderCode,
+  ensureUniqueCustomerPublicId,
+  getOrderRef,
+  resolveCustomerPublicDisplayId,
+} from "./services/publicCodes.js";
 import { buildOrderPrintPdfBuffer } from "./services/orderPdf.js";
+import {
+  getCachedAdminStats,
+  setCachedAdminStats,
+  invalidateAdminStatsCache,
+} from "./services/adminStatsCache.js";
 
 const app = express();
 const PORT = Number(process.env.PORT) || 4043;
@@ -43,6 +57,16 @@ const HOST = (process.env.HOST && String(process.env.HOST).trim() && process.env
 app.use(cors({ origin: true, credentials: true, allowedHeaders: ["Content-Type", "Authorization"] }));
 app.use(express.json({ limit: "10mb" }));
 
+/** Log every request when it finishes (so you see traffic in the terminal, not only `[orders]`). */
+app.use((req, res, next) => {
+  const start = Date.now();
+  res.on("finish", () => {
+    const ms = Date.now() - start;
+    console.log(`[http] ${req.method} ${req.originalUrl || req.url} ${res.statusCode} ${ms}ms`);
+  });
+  next();
+});
+
 /** When DB is connected, require admin JWT; otherwise no-op (legacy in-memory mode). */
 const maybeRequireAdmin = (req, res, next) => {
   if (!dbConnected()) return next();
@@ -50,16 +74,30 @@ const maybeRequireAdmin = (req, res, next) => {
 };
 
 // ----- Helpers when using DB -----
+const CUSTOMER_ID_POPULATE_SELECT =
+  "email firstName lastName phone company address addressLine2 city state zip country createdAt publicId";
+
 function orderToJson(doc) {
   if (!doc) return null;
   const o = doc.toObject ? doc.toObject() : doc;
+  const cId = o.customerId;
+  const customerIdStr =
+    cId && typeof cId === "object" && cId._id != null
+      ? String(cId._id)
+      : cId
+        ? String(cId)
+        : null;
   return {
     id: o._id?.toString() ?? o.id,
+    orderCode: o.orderCode || undefined,
     status: o.status,
     createdAt: o.createdAt,
     updatedAt: o.updatedAt,
     stripeSessionId: o.stripeSessionId,
-    customer: o.customer,
+    paymentProvider: o.paymentProvider || undefined,
+    paymentReferenceId: o.paymentReferenceId || undefined,
+    customerId: customerIdStr,
+    customer: getOrderCustomerView(o) || {},
     items: o.items,
     totalCents: o.totalCents,
     shippingCents: o.shippingCents,
@@ -396,14 +434,17 @@ app.delete("/api/admin/templates/:id", maybeRequireAdmin, async (req, res) => {
 app.post("/api/orders", async (req, res) => {
   try {
     if (dbConnected()) {
+      console.warn("[orders] POST /api/orders 400: DB mode — use create-checkout-session");
       return res.status(400).json({ error: "Use POST /api/orders/create-checkout-session for payment" });
     }
     const { customer, items, totalCents, shippingCents, notes, createAccount } = req.body;
     if (!customer || !items || !Array.isArray(items) || items.length === 0) {
+      console.warn("[orders] POST /api/orders 400: missing customer or items");
       return res.status(400).json({ error: "customer and items (non-empty array) required" });
     }
     const { email, firstName, lastName, phone, address } = customer;
     if (!email?.trim() || !firstName?.trim() || !lastName?.trim()) {
+      console.warn("[orders] POST /api/orders 400: missing customer name/email");
       return res.status(400).json({ error: "customer.email, firstName, lastName required" });
     }
     const order = createOrder({
@@ -414,8 +455,11 @@ app.post("/api/orders", async (req, res) => {
       notes: notes ? String(notes).trim() : undefined,
       createAccount: Boolean(createAccount),
     });
+    console.log("[orders] POST /api/orders ok (in-memory)", { id: order.id, itemCount: items.length, status: order.status });
+    invalidateAdminStatsCache();
     res.status(201).json(order);
   } catch (e) {
+    console.error("[orders] POST /api/orders failed:", e?.message || e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -556,6 +600,266 @@ app.delete("/api/admin/subcategories/:id", maybeRequireAdmin, async (req, res) =
   }
 });
 
+// ---------- Admin: Customers (DB only) ----------
+function customerUserToJson(doc) {
+  if (!doc) return null;
+  const o = doc.toObject ? doc.toObject() : doc;
+  return {
+    id: o._id?.toString(),
+    publicId: resolveCustomerPublicDisplayId(o),
+    email: o.email,
+    firstName: o.firstName,
+    lastName: o.lastName,
+    phone: o.phone,
+    company: o.company,
+    address: o.address,
+    addressLine2: o.addressLine2,
+    city: o.city,
+    state: o.state,
+    zip: o.zip,
+    country: o.country,
+    isRegistered: Boolean(o.isRegistered),
+    createdAt: o.createdAt,
+    updatedAt: o.updatedAt,
+  };
+}
+
+app.get("/api/admin/customers", maybeRequireAdmin, async (req, res) => {
+  try {
+    if (!dbConnected()) return res.status(503).json({ error: "Database not connected" });
+    const page = Math.max(1, parseInt(String(firstQueryParam(req.query.page) ?? "1"), 10) || 1);
+    const limitRaw = parseInt(String(firstQueryParam(req.query.limit) ?? "20"), 10);
+    const limit = Math.min(100, Math.max(1, Number.isFinite(limitRaw) && limitRaw > 0 ? limitRaw : 20));
+    const q = req.query.q ? String(req.query.q).trim() : "";
+    const skip = (page - 1) * limit;
+    const filter = {};
+    if (q) {
+      const re = new RegExp(escapeRegex(q), "i");
+      filter.$or = [{ email: re }, { firstName: re }, { lastName: re }, { phone: re }, { company: re }, { publicId: re }];
+    }
+    const [total, docs] = await Promise.all([
+      CustomerUser.countDocuments(filter),
+      CustomerUser.find(filter).sort({ createdAt: -1 }).skip(skip).limit(limit).lean(),
+    ]);
+    const ids = docs.map((c) => c._id);
+    let orderCountById = new Map();
+    if (ids.length) {
+      const counts = await Order.aggregate([
+        { $match: { customerId: { $in: ids } } },
+        { $group: { _id: "$customerId", n: { $sum: 1 } } },
+      ]);
+      orderCountById = new Map(counts.map((x) => [String(x._id), x.n]));
+    }
+    const customers = docs.map((c) => ({
+      ...customerUserToJson(c),
+      orderCount: orderCountById.get(String(c._id)) ?? 0,
+    }));
+    const totalPages = Math.max(1, Math.ceil(total / limit));
+    return res.json({ customers, total, page, limit, totalPages });
+  } catch (e) {
+    console.error("[admin] GET /api/admin/customers failed:", e?.message || e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get("/api/admin/customers/:id", maybeRequireAdmin, async (req, res) => {
+  try {
+    if (!dbConnected()) return res.status(503).json({ error: "Database not connected" });
+    const id = (req.params.id || "").trim();
+    if (!id) return res.status(400).json({ error: "Missing id" });
+    const doc = await CustomerUser.findById(id).lean();
+    if (!doc) return res.status(404).json({ error: "Customer not found" });
+    const [orderCount, recentOrders] = await Promise.all([
+      Order.countDocuments({ customerId: id }),
+      Order.find({ customerId: id })
+        .sort({ createdAt: -1 })
+        .limit(30)
+        .select("status totalCents shippingCents createdAt orderCode")
+        .lean(),
+    ]);
+    return res.json({
+      customer: customerUserToJson(doc),
+      orderCount,
+      recentOrders: recentOrders.map((o) => ({
+        id: o._id.toString(),
+        orderCode: o.orderCode || undefined,
+        status: o.status,
+        totalCents: o.totalCents,
+        shippingCents: o.shippingCents,
+        createdAt: o.createdAt,
+      })),
+    });
+  } catch (e) {
+    console.error(`[admin] GET /api/admin/customers/:id failed id=${req.params.id}:`, e?.message || e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post("/api/admin/customers", maybeRequireAdmin, async (req, res) => {
+  try {
+    if (!dbConnected()) return res.status(503).json({ error: "Database not connected" });
+    const body = req.body || {};
+    const p = profileFromBody(body);
+    if (!p) {
+      return res.status(400).json({ error: "Valid email is required" });
+    }
+    const existing = await CustomerUser.findOne({ email: p.email });
+    if (existing) {
+      return res.status(409).json({ error: "A customer with this email already exists" });
+    }
+    const pass = body.password != null ? String(body.password).trim() : "";
+    if (pass && pass.length < 6) {
+      return res.status(400).json({ error: "Password must be at least 6 characters" });
+    }
+    const payload = {
+      email: p.email,
+      firstName: p.firstName,
+      lastName: p.lastName,
+      phone: p.phone,
+      company: p.company,
+      address: p.address,
+      addressLine2: p.addressLine2,
+      city: p.city,
+      state: p.state,
+      zip: p.zip,
+      country: p.country,
+      isRegistered: false,
+    };
+    if (pass) {
+      payload.passwordHash = await hashCustomerPassword(pass);
+    }
+    const created = await CustomerUser.create(payload);
+    return res.status(201).json({ customer: customerUserToJson(created) });
+  } catch (e) {
+    console.error("[admin] POST /api/admin/customers failed:", e?.message || e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.patch("/api/admin/customers/:id", maybeRequireAdmin, async (req, res) => {
+  try {
+    if (!dbConnected()) return res.status(503).json({ error: "Database not connected" });
+    const id = (req.params.id || "").trim();
+    if (!id) return res.status(400).json({ error: "Missing id" });
+    const u = await CustomerUser.findById(id);
+    if (!u) return res.status(404).json({ error: "Customer not found" });
+    const body = req.body || {};
+    if (body.email !== undefined) {
+      const ne = String(body.email).trim().toLowerCase();
+      if (!ne) return res.status(400).json({ error: "Email cannot be empty" });
+      if (ne !== u.email) {
+        const other = await CustomerUser.findOne({ email: ne });
+        if (other) return res.status(409).json({ error: "A customer with this email already exists" });
+        u.email = ne;
+      }
+    }
+    const str = (k) => (body[k] !== undefined ? (String(body[k]).trim() || undefined) : undefined);
+    if (body.firstName !== undefined) u.firstName = str("firstName");
+    if (body.lastName !== undefined) u.lastName = str("lastName");
+    if (body.phone !== undefined) u.phone = str("phone");
+    if (body.company !== undefined) u.company = str("company");
+    if (body.address !== undefined) u.address = str("address");
+    if (body.addressLine2 !== undefined) u.addressLine2 = str("addressLine2");
+    if (body.city !== undefined) u.city = str("city");
+    if (body.state !== undefined) u.state = str("state");
+    if (body.zip !== undefined) u.zip = str("zip");
+    if (body.country !== undefined) u.country = str("country");
+    await u.save();
+    if (body.password != null && String(body.password).trim() !== "") {
+      await setCustomerPasswordById(id, body.password);
+    }
+    const fresh = await CustomerUser.findById(id).lean();
+    return res.json({ customer: customerUserToJson(fresh) });
+  } catch (e) {
+    console.error(`[admin] PATCH /api/admin/customers/:id failed id=${req.params.id}:`, e?.message || e);
+    const status = e.message === "Password must be at least 6 characters" ? 400 : 500;
+    res.status(status).json({ error: e.message });
+  }
+});
+
+app.delete("/api/admin/customers/:id", maybeRequireAdmin, async (req, res) => {
+  try {
+    if (!dbConnected()) return res.status(503).json({ error: "Database not connected" });
+    const id = (req.params.id || "").trim();
+    if (!id) return res.status(400).json({ error: "Missing id" });
+    const u = await CustomerUser.findById(id).lean();
+    if (!u) return res.status(404).json({ error: "Customer not found" });
+    const n = await Order.countDocuments({ customerId: id });
+    if (n > 0) {
+      return res.status(409).json({
+        error: `This customer has ${n} order(s). Delete or archive orders first, or keep the record.`,
+      });
+    }
+    await CustomerUser.findByIdAndDelete(id);
+    return res.status(204).send();
+  } catch (e) {
+    console.error(`[admin] DELETE /api/admin/customers/:id failed id=${req.params.id}:`, e?.message || e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+/**
+ * One-time: assign `orderCode` and `publicId` to existing rows. Safe to run multiple times (skips filled fields).
+ * POST body: { "confirm": "backfill-public-codes" }
+ */
+app.post("/api/admin/backfill-public-codes", maybeRequireAdmin, async (req, res) => {
+  try {
+    if (!dbConnected()) return res.status(503).json({ error: "Database not connected" });
+    if (String(req.body?.confirm || "").trim() !== "backfill-public-codes") {
+      return res.status(400).json({ error: 'Send JSON: { "confirm": "backfill-public-codes" }' });
+    }
+    const missingOrders = await Order.find({
+      $or: [{ orderCode: { $exists: false } }, { orderCode: null }, { orderCode: "" }],
+    })
+      .select("_id")
+      .lean();
+    let ordersUpdated = 0;
+    for (const row of missingOrders) {
+      const code = await ensureUniqueOrderCode(Order);
+      await Order.updateOne({ _id: row._id }, { $set: { orderCode: code } });
+      ordersUpdated += 1;
+    }
+    const missingCustomers = await CustomerUser.find({
+      $or: [{ publicId: { $exists: false } }, { publicId: null }, { publicId: "" }],
+    })
+      .select("_id isRegistered")
+      .lean();
+    let customersUpdated = 0;
+    for (const row of missingCustomers) {
+      const full = await CustomerUser.findById(row._id).select("+passwordHash isRegistered");
+      if (!full) continue;
+      const prefix = full.isRegistered || full.passwordHash ? "R" : "G";
+      const publicId = await ensureUniqueCustomerPublicId(CustomerUser, prefix, full._id);
+      await CustomerUser.updateOne({ _id: full._id }, { $set: { publicId } });
+      customersUpdated += 1;
+    }
+    const needUpgrade = await CustomerUser.find({ publicId: { $regex: /^G/ }, isRegistered: true }).lean();
+    let guestIdsUpgradedToRegistered = 0;
+    for (const row of needUpgrade) {
+      const doc = await CustomerUser.findById(row._id);
+      if (!doc || !doc.publicId?.startsWith("G")) continue;
+      const tail = doc.publicId.slice(1);
+      if (tail.length !== 8) continue;
+      const candidate = "R" + tail;
+      const taken = await CustomerUser.exists({ publicId: candidate, _id: { $ne: doc._id } });
+      if (!taken) {
+        doc.publicId = candidate;
+        await doc.save();
+        guestIdsUpgradedToRegistered += 1;
+      }
+    }
+    return res.json({
+      ok: true,
+      ordersUpdated,
+      customersUpdated,
+      guestIdsUpgradedToRegistered,
+    });
+  } catch (e) {
+    console.error("[admin] backfill-public-codes failed:", e?.message || e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // ---------- Admin: Orders (protected when DB) ----------
 app.get("/api/admin/orders", maybeRequireAdmin, async (req, res) => {
   try {
@@ -566,18 +870,52 @@ app.get("/api/admin/orders", maybeRequireAdmin, async (req, res) => {
     const email = req.query.email ? String(req.query.email).trim() : "";
 
     if (dbConnected()) {
-      const filter = {};
-      if (status) filter.status = status;
+      const and = [];
+      if (status) and.push({ status });
       if (email) {
-        filter["customer.email"] = new RegExp(escapeRegex(email), "i");
+        const emailRe = new RegExp(escapeRegex(email), "i");
+        const matchingUsers = await CustomerUser.find({ email: emailRe }).select("_id").lean();
+        const cids = matchingUsers.map((u) => u._id);
+        const byPublicId = await CustomerUser.find({ publicId: emailRe }).select("_id").lean();
+        const pubCids = byPublicId.map((u) => u._id);
+        const or = [{ "customer.email": emailRe }, { orderCode: emailRe }];
+        if (cids.length) or.push({ customerId: { $in: cids } });
+        if (pubCids.length) or.push({ customerId: { $in: pubCids } });
+        and.push({ $or: or });
       }
+      const filter = and.length === 0 ? {} : and.length === 1 ? and[0] : { $and: and };
       const skip = (page - 1) * limit;
+      // Exclude `items` (Mixed / large cart+design data). List view only needs summary fields; full line items load on order detail.
       const [total, docs] = await Promise.all([
         Order.countDocuments(filter),
-        Order.find(filter).sort({ createdAt: -1 }).skip(skip).limit(limit).lean(),
+        Order.find(filter)
+          .select("-items")
+          .populate({ path: "customerId", select: CUSTOMER_ID_POPULATE_SELECT })
+          .sort({ createdAt: -1 })
+          .skip(skip)
+          .limit(limit)
+          .lean(),
       ]);
-      const orders = docs.map((o) => ({ ...o, id: o._id.toString() }));
+      const orders = docs.map((raw) => {
+        const o = raw;
+        const obj = o;
+        const cid = obj.customerId;
+        const customerIdOut =
+          cid && typeof cid === "object" && cid._id != null
+            ? String(cid._id)
+            : cid
+              ? String(cid)
+              : null;
+        return {
+          ...obj,
+          id: obj._id.toString(),
+          items: [],
+          customer: getOrderCustomerView(obj) || {},
+          customerId: customerIdOut,
+        };
+      });
       const totalPages = Math.max(1, Math.ceil(total / limit));
+      console.log("[orders] GET /api/admin/orders", { page, limit, total, status: status || "(all)", hasEmailFilter: Boolean(email) });
       return res.json({ orders, total, page, limit, totalPages });
     }
     const payload = getOrdersPage({
@@ -586,8 +924,10 @@ app.get("/api/admin/orders", maybeRequireAdmin, async (req, res) => {
       page,
       limit,
     });
+    console.log("[orders] GET /api/admin/orders (in-memory)", { page, limit, total: payload.total, status: status || "(all)" });
     return res.json(payload);
   } catch (e) {
+    console.error("[orders] GET /api/admin/orders failed:", e?.message || e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -596,16 +936,22 @@ app.get("/api/admin/orders", maybeRequireAdmin, async (req, res) => {
 app.get("/api/admin/orders/:id/print-pdf", maybeRequireAdmin, async (req, res) => {
   try {
     if (!dbConnected()) {
+      console.warn("[orders] GET /api/admin/orders/:id/print-pdf 503: no DB");
       return res.status(503).json({ error: "Database not connected" });
     }
     const order = await Order.findById(req.params.id);
-    if (!order) return res.status(404).json({ error: "Order not found" });
+    if (!order) {
+      console.warn(`[orders] GET /api/admin/orders/${req.params.id}/print-pdf 404`);
+      return res.status(404).json({ error: "Order not found" });
+    }
     const buf = await buildOrderPrintPdfBuffer(order);
-    const short = order._id.toString().slice(-8);
+    const ref = getOrderRef(order);
+    console.log(`[orders] print-pdf ok order=${order._id.toString()}`);
     res.setHeader("Content-Type", "application/pdf");
-    res.setHeader("Content-Disposition", `inline; filename="order-${short}-print.pdf"`);
+    res.setHeader("Content-Disposition", `inline; filename="order-${ref}-print.pdf"`);
     return res.send(buf);
   } catch (e) {
+    console.error(`[orders] print-pdf failed id=${req.params.id}:`, e?.message || e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -613,14 +959,26 @@ app.get("/api/admin/orders/:id/print-pdf", maybeRequireAdmin, async (req, res) =
 app.get("/api/admin/orders/:id", maybeRequireAdmin, async (req, res) => {
   try {
     if (dbConnected()) {
-      const order = await Order.findById(req.params.id);
-      if (!order) return res.status(404).json({ error: "Order not found" });
+      const order = await Order.findById(req.params.id).populate({
+        path: "customerId",
+        select: CUSTOMER_ID_POPULATE_SELECT,
+      });
+      if (!order) {
+        console.warn(`[orders] GET /api/admin/orders/:id 404 id=${req.params.id}`);
+        return res.status(404).json({ error: "Order not found" });
+      }
+      console.log(`[orders] GET /api/admin/orders/:id ok id=${order._id.toString()} status=${order.status}`);
       return res.json(orderToJson(order));
     }
     const order = getOrderById(req.params.id);
-    if (!order) return res.status(404).json({ error: "Order not found" });
+    if (!order) {
+      console.warn(`[orders] GET /api/admin/orders/:id 404 (in-memory) id=${req.params.id}`);
+      return res.status(404).json({ error: "Order not found" });
+    }
+    console.log(`[orders] GET /api/admin/orders/:id ok (in-memory) id=${order.id} status=${order.status}`);
     res.json(order);
   } catch (e) {
+    console.error(`[orders] GET /api/admin/orders/:id failed id=${req.params.id}:`, e?.message || e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -635,9 +993,18 @@ app.patch("/api/admin/orders/:id", maybeRequireAdmin, async (req, res) => {
         if (body[key] !== undefined) updates[key] = body[key];
       }
       const prev = await Order.findById(req.params.id);
-      if (!prev) return res.status(404).json({ error: "Order not found" });
-      const order = await Order.findByIdAndUpdate(req.params.id, { $set: updates }, { new: true });
-      if (!order) return res.status(404).json({ error: "Order not found" });
+      if (!prev) {
+        console.warn(`[orders] PATCH /api/admin/orders/:id 404 id=${req.params.id}`);
+        return res.status(404).json({ error: "Order not found" });
+      }
+      const order = await Order.findByIdAndUpdate(req.params.id, { $set: updates }, { new: true }).populate({
+        path: "customerId",
+        select: CUSTOMER_ID_POPULATE_SELECT,
+      });
+      if (!order) {
+        console.warn(`[orders] PATCH /api/admin/orders/:id 404 after update id=${req.params.id}`);
+        return res.status(404).json({ error: "Order not found" });
+      }
 
       if (prev.status !== order.status) {
         sendOrderStatusChangedCustomerEmail(order, prev.status).catch((err) =>
@@ -652,14 +1019,26 @@ app.patch("/api/admin/orders/:id", maybeRequireAdmin, async (req, res) => {
         );
       }
 
+      console.log("[orders] PATCH /api/admin/orders/:id", {
+        id: req.params.id,
+        statusChange: prev.status !== order.status ? { from: prev.status, to: order.status } : undefined,
+        updatedKeys: Object.keys(updates),
+      });
+      invalidateAdminStatsCache();
       return res.json(orderToJson(order));
     }
     const { status, ...rest } = req.body || {};
     const id = req.params.id;
     const updated = status != null ? updateOrderStatus(id, status) : updateOrder(id, rest);
-    if (!updated) return res.status(404).json({ error: "Order not found" });
+    if (!updated) {
+      console.warn(`[orders] PATCH /api/admin/orders/:id 404 (in-memory) id=${id}`);
+      return res.status(404).json({ error: "Order not found" });
+    }
+    console.log(`[orders] PATCH /api/admin/orders/:id ok (in-memory) id=${id} status=${updated.status}`);
+    invalidateAdminStatsCache();
     res.json(updated);
   } catch (e) {
+    console.error(`[orders] PATCH /api/admin/orders/:id failed id=${req.params.id}:`, e?.message || e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -669,17 +1048,24 @@ app.delete("/api/admin/orders", maybeRequireAdmin, async (req, res) => {
   try {
     const body = req.body || {};
     if (String(body.confirm || "").trim() !== "delete-all-orders") {
+      console.warn("[orders] DELETE /api/admin/orders 400: confirm string missing/wrong");
       return res.status(400).json({
         error: 'Send JSON body: { "confirm": "delete-all-orders" }',
       });
     }
     if (dbConnected()) {
       const result = await Order.deleteMany({});
-      return res.json({ deletedCount: result.deletedCount ?? 0 });
+      const n = result.deletedCount ?? 0;
+      console.warn(`[orders] DELETE /api/admin/orders (all) deletedCount=${n}`);
+      invalidateAdminStatsCache();
+      return res.json({ deletedCount: n });
     }
     const n = deleteAllOrders();
+    console.warn(`[orders] DELETE /api/admin/orders (all, in-memory) deletedCount=${n}`);
+    invalidateAdminStatsCache();
     return res.json({ deletedCount: n });
   } catch (e) {
+    console.error("[orders] DELETE /api/admin/orders failed:", e?.message || e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -687,19 +1073,34 @@ app.delete("/api/admin/orders", maybeRequireAdmin, async (req, res) => {
 app.delete("/api/admin/orders/:id", maybeRequireAdmin, async (req, res) => {
   try {
     const id = (req.params.id || "").trim();
-    if (!id) return res.status(400).json({ error: "Missing order id" });
+    if (!id) {
+      console.warn("[orders] DELETE /api/admin/orders/:id 400: missing id");
+      return res.status(400).json({ error: "Missing order id" });
+    }
     if (dbConnected()) {
       const deleted = await Order.findByIdAndDelete(id);
-      if (!deleted) return res.status(404).json({ error: "Order not found" });
+      if (!deleted) {
+        console.warn(`[orders] DELETE /api/admin/orders/:id 404 id=${id}`);
+        return res.status(404).json({ error: "Order not found" });
+      }
+      console.log(`[orders] DELETE /api/admin/orders/:id ok id=${id}`);
+      invalidateAdminStatsCache();
       return res.status(204).send();
     }
-    if (!deleteOrderById(id)) return res.status(404).json({ error: "Order not found" });
+    if (!deleteOrderById(id)) {
+      console.warn(`[orders] DELETE /api/admin/orders/:id 404 (in-memory) id=${id}`);
+      return res.status(404).json({ error: "Order not found" });
+    }
+    console.log(`[orders] DELETE /api/admin/orders/:id ok (in-memory) id=${id}`);
+    invalidateAdminStatsCache();
     return res.status(204).send();
   } catch (e) {
     const msg = e?.message || String(e);
     if (e?.name === "CastError" || /Cast to ObjectId failed/i.test(msg)) {
+      console.warn(`[orders] DELETE /api/admin/orders/:id 400: invalid id id=${req.params.id}`);
       return res.status(400).json({ error: "Invalid order id" });
     }
+    console.error(`[orders] DELETE /api/admin/orders/:id failed id=${req.params.id}:`, msg);
     res.status(500).json({ error: msg });
   }
 });
@@ -711,6 +1112,11 @@ app.get("/api/admin/order-statuses", (req, res) => {
 // ---------- Admin: Dashboard stats (protected when DB) ----------
 app.get("/api/admin/stats", maybeRequireAdmin, async (req, res) => {
   try {
+    const cached = getCachedAdminStats();
+    if (cached) {
+      res.setHeader("X-Admin-Stats-Cache", "hit");
+      return res.json(cached);
+    }
     const paidStatuses = ["confirmed", "in_production", "shipped", "delivered"];
     const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
     if (dbConnected()) {
@@ -777,7 +1183,7 @@ app.get("/api/admin/stats", maybeRequireAdmin, async (req, res) => {
         const revFound = revenueLast7DaysAgg.find((x) => x._id === dateStr);
         revenueLast7Days.push({ date: dateStr, revenueCents: revFound ? revFound.revenueCents : 0 });
       }
-      return res.json({
+      const body = {
         totalOrders,
         ordersByStatus,
         totalRevenueCents,
@@ -788,7 +1194,10 @@ app.get("/api/admin/stats", maybeRequireAdmin, async (req, res) => {
         totalTemplates,
         categoriesCount,
         subcategoriesCount,
-      });
+      };
+      setCachedAdminStats(body);
+      res.setHeader("X-Admin-Stats-Cache", "miss");
+      return res.json(body);
     }
     const list = getAllOrders();
     const totalOrders = list.length;
@@ -818,7 +1227,7 @@ app.get("/api/admin/stats", maybeRequireAdmin, async (req, res) => {
       });
       revenueLast7DaysList.push({ date: dateStr, revenueCents: rev });
     }
-    res.json({
+    const bodyNoDb = {
       totalOrders,
       ordersByStatus,
       totalRevenueCents,
@@ -829,7 +1238,10 @@ app.get("/api/admin/stats", maybeRequireAdmin, async (req, res) => {
       totalTemplates: 0,
       categoriesCount: 0,
       subcategoriesCount: 0,
-    });
+    };
+    setCachedAdminStats(bodyNoDb);
+    res.setHeader("X-Admin-Stats-Cache", "miss");
+    return res.json(bodyNoDb);
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
