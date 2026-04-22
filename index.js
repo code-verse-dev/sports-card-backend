@@ -501,11 +501,11 @@ app.get("/api/orders/internal/order-items-for-pdf", async (req, res) => {
 // ---------- Public: Stripe checkout (create session, confirm) ----------
 app.use("/api/orders", stripeRouter);
 
-// ---------- Admin auth (no auth middleware) ----------
-app.use("/api/admin", adminAuthRouter);
-
 // ---------- Customer (store) auth: login, register, orders ----------
 app.use("/api/user", userAuthRouter);
+
+// NOTE: app.use("/api/admin", adminAuthRouter) is registered AFTER all explicit /api/admin/* routes
+// so GET /api/admin/customers (and similar) are not swallowed by the sub-router (which only defines /login and /seed-admin).
 
 // ---------- Admin: Seed default categories (URL-style ids) ----------
 app.post("/api/admin/categories/seed-defaults", maybeRequireAdmin, async (req, res) => {
@@ -1306,6 +1306,9 @@ app.put("/api/admin/prices", maybeRequireAdmin, async (req, res) => {
     res.status(500).json({ error: e.message });
   }
 });
+
+// ---------- Admin auth (no auth middleware) — after other /api/admin/* so those routes match first ----------
+app.use("/api/admin", adminAuthRouter);
 
 // ---------- Health ----------
 app.get("/api/health", (req, res) => {
