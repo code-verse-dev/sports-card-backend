@@ -6,6 +6,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 import express from "express";
 import cors from "cors";
+import jwt from "jsonwebtoken";
 import fs from "fs/promises";
 import { connectDB, dbConnected } from "./db.js";
 import { requireAdmin } from "./middleware/auth.js";
@@ -460,6 +461,39 @@ app.post("/api/orders", async (req, res) => {
     res.status(201).json(order);
   } catch (e) {
     console.error("[orders] POST /api/orders failed:", e?.message || e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+/** JWT secret for short-lived headless PDF worker tokens (defaults to JWT_SECRET). */
+function orderPdfJwtSecret() {
+  return String(process.env.ORDER_CARD_PDF_JWT_SECRET || process.env.JWT_SECRET || "").trim();
+}
+
+/**
+ * Used only by the storefront worker page (Puppeteer) to load cart line items for full-card PDF generation.
+ * Query: token (JWT with typ order-card-pdf, orderId).
+ */
+app.get("/api/orders/internal/order-items-for-pdf", async (req, res) => {
+  try {
+    if (!dbConnected()) return res.status(503).json({ error: "Database not configured" });
+    const token = String(req.query.token || "").trim();
+    if (!token) return res.status(400).json({ error: "token required" });
+    const secret = orderPdfJwtSecret();
+    if (!secret) return res.status(503).json({ error: "JWT secret not configured" });
+    let payload;
+    try {
+      payload = jwt.verify(token, secret);
+    } catch {
+      return res.status(401).json({ error: "Invalid or expired token" });
+    }
+    if (payload.typ !== "order-card-pdf" || !payload.orderId) {
+      return res.status(401).json({ error: "Invalid token" });
+    }
+    const order = await Order.findById(payload.orderId).select("items").lean();
+    if (!order) return res.status(404).json({ error: "Order not found" });
+    res.json({ items: order.items || [] });
+  } catch (e) {
     res.status(500).json({ error: e.message });
   }
 });

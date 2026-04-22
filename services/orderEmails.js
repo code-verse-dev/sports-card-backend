@@ -14,6 +14,7 @@ import {
   getAdminOrdersUrl,
 } from "./mail.js";
 import { buildOrderPrintPdfBuffer } from "./orderPdf.js";
+import { buildFullOrderCardPdfBufferHeadless } from "./orderCardPdfHeadless.js";
 import { getOrderCustomerView } from "./orderCustomer.js";
 import { getOrderRef } from "./publicCodes.js";
 import { Order } from "../models/Order.js";
@@ -29,6 +30,16 @@ function esc(s) {
 function formatMoney(cents) {
   const n = Number(cents) || 0;
   return `$${(n / 100).toFixed(2)}`;
+}
+
+/** True if the customer paid for the digital PDF add-on on any line. */
+function orderIncludesPurchasedPdf(order) {
+  const items = order.items || [];
+  for (const it of items) {
+    if (it.pdfOption) return true;
+    if (Array.isArray(it.lineItems) && it.lineItems.some((l) => l.pdfOption)) return true;
+  }
+  return false;
 }
 
 function myAccountUrl() {
@@ -169,12 +180,21 @@ function statusPill(text, highlight) {
 
 /**
  * @param {import('mongoose').Document | object} order
+ * @param {{ fullCardPdfBuffer?: Buffer | null }} [opts]
  */
-export async function sendOrderPlacedCustomerEmail(order) {
+export async function sendOrderPlacedCustomerEmail(order, opts = {}) {
+  const { fullCardPdfBuffer } = opts;
   const email = getOrderCustomerView(order).email?.trim();
   if (!email) return;
   const ref = getOrderRef(order);
   const accent = getMailAccentColor();
+  const wantsPdf = orderIncludesPurchasedPdf(order);
+  const pdfAttached = Boolean(wantsPdf && fullCardPdfBuffer);
+  const pdfNote = wantsPdf
+    ? pdfAttached
+      ? `<p style="margin:16px 0 0;font-size:14px;color:#475569;">Your <strong>printable card PDF</strong> (front and back for each custom design) is attached to this message.</p>`
+      : `<p style="margin:16px 0 0;font-size:14px;color:#475569;">You added the <strong>digital PDF</strong> option. We could not attach the file automatically; reply to this email or contact support with order <strong>#${esc(ref)}</strong> and we will send your PDF.</p>`
+    : "";
   const preheader = `Your order #${ref} is confirmed — thank you for choosing ${getMailBrandName()}.`;
   const bodyHtml = `
     <p style="margin:0 0 16px;font-size:17px;color:#0f172a;font-weight:600;">Hi ${esc(customerName(order))},</p>
@@ -183,21 +203,28 @@ export async function sendOrderPlacedCustomerEmail(order) {
     <p style="margin:0 0 4px;font-size:22px;font-weight:700;color:${accent};letter-spacing:-0.02em;">#${esc(ref)}</p>
     <p style="margin:0 0 8px;font-size:14px;color:#64748b;">Keep this number for your records.</p>
     ${orderSummaryBlock(order)}
+    ${pdfNote}
     <p style="margin:8px 0 0;">Track progress and details anytime in your account.</p>
     ${emailButton(myAccountUrl(), "View my orders")}
   `;
+  const attachments = pdfAttached
+    ? [{ filename: `order-${ref}-your-cards.pdf`, content: fullCardPdfBuffer, contentType: "application/pdf" }]
+    : [];
   await sendMailMessage({
     to: email,
-    subject: `Order received — #${ref}`,
+    subject: pdfAttached ? `Order received — #${ref} (PDF attached)` : `Order received — #${ref}`,
     html: wrapEmailHtml({ preheader, bodyHtml }),
     text: `Hi ${customerName(order)}, we received your order #${ref}. Total ${formatMoney((order.totalCents ?? 0) + (order.shippingCents ?? 0))}. My orders: ${myAccountUrl()}`,
+    attachments,
   });
 }
 
 /**
  * @param {import('mongoose').Document | object} order
+ * @param {{ fullCardPdfBuffer?: Buffer | null }} [opts]
  */
-export async function sendOrderPlacedAdminEmail(order) {
+export async function sendOrderPlacedAdminEmail(order, opts = {}) {
+  const { fullCardPdfBuffer } = opts;
   const admins = getAdminNotificationEmails();
   if (admins.length === 0) {
     console.warn("[orderEmails] ADMIN_EMAIL / ADMIN_NOTIFICATION_EMAILS not set — skipping admin notification");
@@ -206,12 +233,15 @@ export async function sendOrderPlacedAdminEmail(order) {
   const ref = getOrderRef(order);
   const id = order._id?.toString?.() ?? order.id ?? "";
   const brand = getMailBrandName();
-  let pdfBuffer;
-  try {
-    pdfBuffer = await buildOrderPrintPdfBuffer(order);
-  } catch (e) {
-    console.error("[orderEmails] PDF build failed:", e.message);
-    pdfBuffer = null;
+  /** @type {Buffer | null} */
+  let fallbackSnapshotPdf = null;
+  if (!fullCardPdfBuffer) {
+    try {
+      fallbackSnapshotPdf = await buildOrderPrintPdfBuffer(order);
+    } catch (e) {
+      console.error("[orderEmails] Snapshot PDF build failed:", e.message);
+      fallbackSnapshotPdf = null;
+    }
   }
   const adminUrl = getAdminOrdersUrl();
   const cView = getOrderCustomerView(order);
@@ -220,6 +250,11 @@ export async function sendOrderPlacedAdminEmail(order) {
   const adminCta = adminUrl
     ? `<p style="margin:16px 0 0;">${emailButton(adminUrl, "Open orders in admin")}</p>`
     : "";
+  const attachNote = fullCardPdfBuffer
+    ? `<p style="margin:16px 0 0;font-size:14px;color:#475569;">Attached: <strong>full card PDF</strong> (composed front &amp; back per design), same as Admin → Download card PDF.</p>`
+    : fallbackSnapshotPdf
+      ? `<p style="margin:16px 0 0;font-size:14px;color:#475569;">Attached: <strong>snapshot PDF</strong> (raw upload images from the order). Full composed cards: open the order in admin and use Download card PDF, or set PUBLIC_APP_URL and install Puppeteer on the API server for automatic full-card PDFs.</p>`
+      : `<p style="margin:16px 0 0;font-size:14px;color:#475569;">No PDF attached (no design snapshot images and headless card PDF unavailable).</p>`;
   const bodyHtml = `
     <p style="margin:0 0 8px;font-size:13px;font-weight:600;letter-spacing:0.06em;text-transform:uppercase;color:#94a3b8;">Fulfillment</p>
     <p style="margin:0 0 16px;font-size:20px;font-weight:700;color:#0f172a;">New paid order <span style="color:${getMailAccentColor()};">#${esc(ref)}</span></p>
@@ -232,15 +267,23 @@ export async function sendOrderPlacedAdminEmail(order) {
       </td></tr>
     </table>
     ${orderSummaryBlock(order)}
-    <p style="margin:16px 0 0;font-size:14px;color:#475569;">A <strong>print PDF</strong> is attached when design images are present in the order snapshot.</p>
+    ${attachNote}
     ${adminCta}
   `;
-  const attachments = pdfBuffer
-    ? [{ filename: `order-${ref}-print.pdf`, content: pdfBuffer, contentType: "application/pdf" }]
-    : [];
+  const attachments = [];
+  if (fullCardPdfBuffer) {
+    attachments.push({ filename: `order-${ref}-full-card.pdf`, content: fullCardPdfBuffer, contentType: "application/pdf" });
+  } else if (fallbackSnapshotPdf) {
+    attachments.push({ filename: `order-${ref}-uploads-snapshot.pdf`, content: fallbackSnapshotPdf, contentType: "application/pdf" });
+  }
+  const subj = fullCardPdfBuffer
+    ? `[${brand}] New order #${ref} — full card PDF attached`
+    : fallbackSnapshotPdf
+      ? `[${brand}] New order #${ref} — snapshot PDF attached`
+      : `[${brand}] New order #${ref}`;
   await sendMailMessage({
     to: admins,
-    subject: `[${brand}] New order #${ref} — print pack attached`,
+    subject: subj,
     html: wrapEmailHtml({ preheader, bodyHtml }),
     text: `New order #${ref} (${id}). Customer ${cView.email || ""}${cView.publicId ? ` · ${cView.publicId}` : ""}. Admin: ${adminUrl || "(set PUBLIC_APP_URL)"}`,
     attachments,
@@ -266,13 +309,20 @@ export async function notifyOrderPlaced(order) {
     .lean();
   if (!full) return;
   const merged = { ...full, id: full._id?.toString() };
+  let fullCardPdfBuffer = null;
   try {
-    await sendOrderPlacedCustomerEmail(merged);
+    fullCardPdfBuffer = await buildFullOrderCardPdfBufferHeadless(id);
+  } catch (e) {
+    console.error("[orderEmails] Headless full card PDF failed:", e?.message || e);
+    fullCardPdfBuffer = null;
+  }
+  try {
+    await sendOrderPlacedCustomerEmail(merged, { fullCardPdfBuffer });
   } catch (e) {
     console.error("[orderEmails] Customer order email failed:", e.message);
   }
   try {
-    await sendOrderPlacedAdminEmail(merged);
+    await sendOrderPlacedAdminEmail(merged, { fullCardPdfBuffer });
   } catch (e) {
     console.error("[orderEmails] Admin order email failed:", e.message);
   }
