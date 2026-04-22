@@ -304,7 +304,7 @@ export async function notifyOrderPlaced(order) {
   const full = await Order.findById(id)
     .populate({
       path: "customerId",
-      select: "email firstName lastName phone company address addressLine2 city state zip country publicId",
+      select: "email firstName lastName phone address addressLine2 city state zip country publicId",
     })
     .lean();
   if (!full) return;

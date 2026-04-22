@@ -10,7 +10,6 @@ export function profileFromBody(c) {
     firstName: String(c.firstName || "").trim() || undefined,
     lastName: String(c.lastName || "").trim() || undefined,
     phone: c.phone != null && String(c.phone).trim() ? String(c.phone).trim() : undefined,
-    company: c.company != null && String(c.company).trim() ? String(c.company).trim() : undefined,
     address: c.address != null && String(c.address).trim() ? String(c.address).trim() : undefined,
     addressLine2: c.addressLine2 != null && String(c.addressLine2).trim() ? String(c.addressLine2).trim() : undefined,
     city: c.city != null && String(c.city).trim() ? String(c.city).trim() : undefined,
@@ -32,7 +31,6 @@ export async function upsertCustomerFromCheckout(customer) {
     if (p.firstName !== undefined) existing.firstName = p.firstName;
     if (p.lastName !== undefined) existing.lastName = p.lastName;
     if (p.phone !== undefined) existing.phone = p.phone;
-    if (p.company !== undefined) existing.company = p.company;
     if (p.address !== undefined) existing.address = p.address;
     if (p.addressLine2 !== undefined) existing.addressLine2 = p.addressLine2;
     if (p.city !== undefined) existing.city = p.city;
@@ -47,7 +45,6 @@ export async function upsertCustomerFromCheckout(customer) {
     firstName: p.firstName,
     lastName: p.lastName,
     phone: p.phone,
-    company: p.company,
     address: p.address,
     addressLine2: p.addressLine2,
     city: p.city,
@@ -66,7 +63,6 @@ export async function saveProfileFromCheckoutBody(user, customer) {
   if (p.firstName !== undefined) user.firstName = p.firstName;
   if (p.lastName !== undefined) user.lastName = p.lastName;
   if (p.phone !== undefined) user.phone = p.phone;
-  if (p.company !== undefined) user.company = p.company;
   if (p.address !== undefined) user.address = p.address;
   if (p.addressLine2 !== undefined) user.addressLine2 = p.addressLine2;
   if (p.city !== undefined) user.city = p.city;

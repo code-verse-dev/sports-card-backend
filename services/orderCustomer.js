@@ -14,7 +14,6 @@ export function getOrderCustomerView(order) {
       firstName: ref.firstName,
       lastName: ref.lastName,
       phone: ref.phone,
-      company: ref.company,
       address: ref.address,
       addressLine2: ref.addressLine2,
       city: ref.city,

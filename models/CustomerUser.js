@@ -19,7 +19,6 @@ const customerUserSchema = new mongoose.Schema(
     firstName: { type: String, trim: true },
     lastName: { type: String, trim: true },
     phone: { type: String, trim: true },
-    company: { type: String, trim: true },
     address: { type: String, trim: true },
     addressLine2: { type: String, trim: true },
     city: { type: String, trim: true },

@@ -9,7 +9,7 @@ import { UserSavedDesign } from "../models/UserSavedDesign.js";
 
 const router = Router();
 
-/** POST /api/user/register - body: { email, password, firstName?, lastName?, phone?, company?, address?, addressLine2?, city?, state?, zip?, country? }. Creates customer account. */
+/** POST /api/user/register - body: { email, password, firstName?, lastName?, phone?, address?, addressLine2?, city?, state?, zip?, country? }. Creates customer account. */
 router.post("/register", async (req, res) => {
   if (!dbConnected()) {
     return res.status(503).json({ error: "Registration is not available" });
@@ -20,7 +20,6 @@ router.post("/register", async (req, res) => {
     firstName,
     lastName,
     phone,
-    company,
     address,
     addressLine2,
     city,
@@ -47,7 +46,6 @@ router.post("/register", async (req, res) => {
       if (opt(firstName) !== undefined) existing.firstName = opt(firstName);
       if (opt(lastName) !== undefined) existing.lastName = opt(lastName);
       if (opt(phone) !== undefined) existing.phone = opt(phone);
-      if (opt(company) !== undefined) existing.company = opt(company);
       if (opt(address) !== undefined) existing.address = opt(address);
       if (opt(addressLine2) !== undefined) existing.addressLine2 = opt(addressLine2);
       if (opt(city) !== undefined) existing.city = opt(city);
@@ -71,7 +69,6 @@ router.post("/register", async (req, res) => {
       firstName: opt(firstName),
       lastName: opt(lastName),
       phone: opt(phone),
-      company: opt(company),
       address: opt(address),
       addressLine2: opt(addressLine2),
       city: opt(city),
@@ -132,7 +129,6 @@ router.get("/me", requireCustomer, (req, res) => {
     firstName: u.firstName,
     lastName: u.lastName,
     phone: u.phone,
-    company: u.company,
     address: u.address,
     addressLine2: u.addressLine2,
     city: u.city,
@@ -142,16 +138,15 @@ router.get("/me", requireCustomer, (req, res) => {
   });
 });
 
-/** PATCH /api/user/me - requires auth. Body: { firstName?, lastName?, phone?, company?, address?, addressLine2?, city?, state?, zip?, country? }. */
+/** PATCH /api/user/me - requires auth. Body: { firstName?, lastName?, phone?, address?, addressLine2?, city?, state?, zip?, country? }. */
 router.patch("/me", requireCustomer, async (req, res) => {
   try {
     const user = req.customerUser;
     if (!user) return res.status(401).json({ error: "Unauthorized" });
-    const { firstName, lastName, phone, company, address, addressLine2, city, state, zip, country } = req.body || {};
+    const { firstName, lastName, phone, address, addressLine2, city, state, zip, country } = req.body || {};
     if (firstName !== undefined) user.firstName = String(firstName).trim() || undefined;
     if (lastName !== undefined) user.lastName = String(lastName).trim() || undefined;
     if (phone !== undefined) user.phone = String(phone).trim() || undefined;
-    if (company !== undefined) user.company = String(company).trim() || undefined;
     if (address !== undefined) user.address = String(address).trim() || undefined;
     if (addressLine2 !== undefined) user.addressLine2 = String(addressLine2).trim() || undefined;
     if (city !== undefined) user.city = String(city).trim() || undefined;
@@ -165,7 +160,6 @@ router.patch("/me", requireCustomer, async (req, res) => {
       firstName: user.firstName,
       lastName: user.lastName,
       phone: user.phone,
-      company: user.company,
       address: user.address,
       addressLine2: user.addressLine2,
       city: user.city,
