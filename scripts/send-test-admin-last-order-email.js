@@ -11,8 +11,7 @@
  * If you get no mail: check Spam/Promotions, run `npm run smtp:test -- your@email.com`, and ensure
  * MAIL_FROM (if set) is allowed for your SMTP account (Gmail often requires it to match SMTP_USER or an alias).
  *
- * Headless PDF can take several minutes (templates + html2canvas). Override outer cap with TEST_ORDER_EMAIL_PDF_MS (ms);
- * inner wait uses ORDER_CARD_PDF_WAIT_TIMEOUT_MS (default 10m in orderCardPdfHeadless.js).
+ * Headless PDF can take several minutes (templates + html2canvas). Override wait with TEST_ORDER_EMAIL_PDF_MS (ms).
  */
 import "../load-env.js";
 import path from "path";
@@ -29,8 +28,8 @@ import { isMailConfigured, getMailFrom } from "../services/mail.js";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const pdfOutPath = path.join(__dirname, "last-order-admin-email-preview.pdf");
 
-/** Must exceed Puppeteer goto + waitForFunction (see orderCardPdfHeadless ORDER_CARD_PDF_*_TIMEOUT_MS). Default 12 min. */
-const PDF_BUILD_MS = Number(process.env.TEST_ORDER_EMAIL_PDF_MS || 720000);
+/** Must exceed Puppeteer goto + render (see orderCardPdfHeadless ORDER_CARD_PDF_*_TIMEOUT_MS). Default 6 min. */
+const PDF_BUILD_MS = Number(process.env.TEST_ORDER_EMAIL_PDF_MS || 360000);
 
 function withTimeout(promise, ms, label) {
   return Promise.race([

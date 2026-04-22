@@ -54,8 +54,7 @@ export async function buildFullOrderCardPdfBufferHeadless(orderId, opts = {}) {
 
   const url = `${pageBase}?token=${encodeURIComponent(token)}`;
   const gotoMs = Math.max(30000, Number(process.env.ORDER_CARD_PDF_GOTO_TIMEOUT_MS || 180000));
-  /** html2canvas + templates can exceed 5m on large orders; keep in sync with TEST_ORDER_EMAIL_PDF_MS. */
-  const waitFnMs = Math.max(60000, Number(process.env.ORDER_CARD_PDF_WAIT_TIMEOUT_MS || 600000));
+  const waitFnMs = Math.max(60000, Number(process.env.ORDER_CARD_PDF_WAIT_TIMEOUT_MS || 300000));
 
   const browser = await puppeteer.launch({
     headless: true,
@@ -63,37 +62,11 @@ export async function buildFullOrderCardPdfBufferHeadless(orderId, opts = {}) {
   });
   try {
     const page = await browser.newPage();
-    page.on("console", (msg) => {
-      try {
-        const t = msg.text();
-        if (t.startsWith("Failed to load resource")) return;
-        console.warn("[orderCardPdfHeadless][page]", msg.type(), t);
-      } catch {
-        /* ignore */
-      }
-    });
-    page.on("pageerror", (err) => {
-      console.warn("[orderCardPdfHeadless][pageerror]", err?.message || err);
-    });
-    await page.goto(url, { waitUntil: "load", timeout: gotoMs });
-    try {
-      await page.waitForFunction(
-        () => Boolean(window.__ORDER_CARD_PDF_BASE64__ || window.__ORDER_CARD_PDF_ERR__),
-        { timeout: waitFnMs }
-      );
-    } catch (e) {
-      const hint = await page
-        .evaluate(() => {
-          try {
-            return document.body?.innerText?.trim()?.slice(0, 500) || "";
-          } catch {
-            return "";
-          }
-        })
-        .catch(() => "");
-      const extra = hint ? ` — worker page text (trimmed): ${hint.replace(/\s+/g, " ")}` : "";
-      throw new Error(`${e?.message || e}${extra}`);
-    }
+    await page.goto(url, { waitUntil: "domcontentloaded", timeout: gotoMs });
+    await page.waitForFunction(
+      () => Boolean(window.__ORDER_CARD_PDF_BASE64__ || window.__ORDER_CARD_PDF_ERR__),
+      { timeout: waitFnMs }
+    );
     const err = await page.evaluate(() => window.__ORDER_CARD_PDF_ERR__);
     if (err) throw new Error(String(err));
     const b64 = await page.evaluate(() => window.__ORDER_CARD_PDF_BASE64__);
