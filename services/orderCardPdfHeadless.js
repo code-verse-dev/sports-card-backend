@@ -1,4 +1,5 @@
 import jwt from "jsonwebtoken";
+import { getPuppeteerLaunchOptions } from "./puppeteerLaunchConfig.js";
 
 function pdfTokenSecret() {
   return String(process.env.ORDER_CARD_PDF_JWT_SECRET || process.env.JWT_SECRET || "").trim();
@@ -56,10 +57,7 @@ export async function buildFullOrderCardPdfBufferHeadless(orderId, opts = {}) {
   const gotoMs = Math.max(30000, Number(process.env.ORDER_CARD_PDF_GOTO_TIMEOUT_MS || 180000));
   const waitFnMs = Math.max(60000, Number(process.env.ORDER_CARD_PDF_WAIT_TIMEOUT_MS || 300000));
 
-  const browser = await puppeteer.launch({
-    headless: true,
-    args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"],
-  });
+  const browser = await puppeteer.launch(getPuppeteerLaunchOptions());
   try {
     const page = await browser.newPage();
     await page.goto(url, { waitUntil: "domcontentloaded", timeout: gotoMs });

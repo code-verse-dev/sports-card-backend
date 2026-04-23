@@ -2,6 +2,7 @@ import jwt from "jsonwebtoken";
 import archiver from "archiver";
 import { getOrderRef } from "./publicCodes.js";
 import { filterDesignedItemsForCardCapture } from "./orderCardPdfExportMeta.js";
+import { getPuppeteerLaunchOptions } from "./puppeteerLaunchConfig.js";
 
 function captureJwtSecret() {
   return String(process.env.ORDER_CARD_PDF_JWT_SECRET || process.env.JWT_SECRET || "").trim();
@@ -57,10 +58,7 @@ export async function buildOrderCardImagesZipHeadless(order) {
   const ref = getOrderRef(order);
   const filenameBase = `order-${ref}`;
 
-  const browser = await puppeteer.launch({
-    headless: true,
-    args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"],
-  });
+  const browser = await puppeteer.launch(getPuppeteerLaunchOptions());
 
   const entries = [];
   try {
