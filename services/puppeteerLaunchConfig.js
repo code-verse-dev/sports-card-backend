@@ -16,6 +16,11 @@ import fs from "fs";
  *
  * Or set `PUPPETEER_EXECUTABLE_PATH` / `CHROME_BIN` to a full Chrome/Chromium binary that
  * already matches your OS (e.g. `/usr/bin/chromium` or `/usr/bin/google-chrome-stable`).
+ *
+ * **Cross-origin fonts (cdnfonts, etc.):** Headless Chromium may log
+ * `ERR_BLOCKED_BY_RESPONSE.NotSameOrigin` for third-party `@import` font CSS. By default we add
+ * `--disable-web-security` (server-side automation only). Set `PUPPETEER_STRICT_ORIGIN=1` to omit
+ * those flags and instead self-host fonts or use same-origin font URLs.
  */
 
 function resolveChromiumExecutablePath() {
@@ -42,11 +47,24 @@ function resolveChromiumExecutablePath() {
 export function getPuppeteerLaunchOptions() {
   const executablePath = resolveChromiumExecutablePath();
   const ignoreHTTPSErrors = String(process.env.PUPPETEER_IGNORE_HTTPS_ERRORS || "").trim() === "1";
+  const strictOrigin = String(process.env.PUPPETEER_STRICT_ORIGIN || "").trim() === "1";
+
+  const args = [
+    "--no-sandbox",
+    "--disable-setuid-sandbox",
+    "--disable-dev-shm-usage",
+    "--disable-gpu",
+  ];
+  /** Lets cross-origin font stylesheets (e.g. fonts.cdnfonts.com) load in headless — avoids NotSameOrigin. */
+  if (!strictOrigin) {
+    args.push("--disable-web-security", "--disable-features=IsolateOrigins,site-per-process");
+  }
+
   return {
     headless: true,
     ...(executablePath ? { executablePath } : {}),
     ...(ignoreHTTPSErrors ? { ignoreHTTPSErrors: true } : {}),
-    args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
+    args,
   };
 }
 
