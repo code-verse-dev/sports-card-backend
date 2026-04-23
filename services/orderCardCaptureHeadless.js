@@ -58,7 +58,9 @@ export async function buildOrderCardImagesZipHeadless(order) {
   const ref = getOrderRef(order);
   const filenameBase = `order-${ref}`;
 
-  const browser = await puppeteer.launch(getPuppeteerLaunchOptions());
+  const launchOpts = getPuppeteerLaunchOptions();
+  console.info("[orderCardCaptureHeadless] chromium executable:", launchOpts.executablePath || "(puppeteer bundled — needs OS libs, see puppeteerLaunchConfig.js)");
+  const browser = await puppeteer.launch(launchOpts);
 
   const entries = [];
   try {
