@@ -68,9 +68,18 @@ export async function buildOrderCardImagesZipHeadless(order) {
     await page.setBypassCSP(true).catch(() => {});
     page.setDefaultNavigationTimeout(gotoMs);
     page.setDefaultTimeout(waitFnMs);
+    /** Suppress noisy font-CSS failures (cdnfonts CORP); screenshots still succeed with fallback fonts. */
+    const isNoisyFontFailure = (url, errText) =>
+      /fonts\.cdnfonts\.com|fonts\.googleapis\.com/i.test(url) &&
+      /NotSameOrigin|blocked.*response|ORB|ERR_BLOCKED/i.test(String(errText || ""));
+
+    let noisyFontSkipLogged = false;
     page.on("console", (msg) => {
       const t = msg.text();
       const ty = msg.type();
+      if (ty === "error" && /Failed to load resource/i.test(t) && /fonts\.cdnfonts\.com|fonts\.googleapis\.com/i.test(t)) {
+        return;
+      }
       if (ty === "error" || ty === "warn" || t.includes("[order-card-capture]")) {
         console.info("[orderCardCaptureHeadless] page console:", ty, t.slice(0, 800));
       }
@@ -80,7 +89,18 @@ export async function buildOrderCardImagesZipHeadless(order) {
     });
     page.on("requestfailed", (req) => {
       const f = req.failure();
-      console.warn("[orderCardCaptureHeadless] requestfailed:", req.url().slice(0, 200), f?.errorText || "");
+      const u = req.url();
+      const et = f?.errorText || "";
+      if (isNoisyFontFailure(u, et)) {
+        if (!noisyFontSkipLogged) {
+          noisyFontSkipLogged = true;
+          console.info(
+            "[orderCardCaptureHeadless] (suppressed further font CSS requestfailed logs — third-party font stylesheets; capture uses system fallbacks)"
+          );
+        }
+        return;
+      }
+      console.warn("[orderCardCaptureHeadless] requestfailed:", u.slice(0, 200), et);
     });
     page.on("response", (res) => {
       const u = res.url();

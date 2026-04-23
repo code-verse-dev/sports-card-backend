@@ -43,6 +43,7 @@ import {
   filterDesignedItemsForCardCapture,
 } from "./services/orderCardPdfExportMeta.js";
 import { buildOrderCardImagesZipHeadless } from "./services/orderCardCaptureHeadless.js";
+import { buildFullOrderCardPdfBufferHeadless } from "./services/orderCardPdfHeadless.js";
 import { augmentPuppeteerLaunchError } from "./services/puppeteerLaunchConfig.js";
 import { profileFromBody, setCustomerPasswordById } from "./services/customerProfile.js";
 import {
@@ -479,8 +480,8 @@ function orderPdfJwtSecret() {
 
 /**
  * Used only by the storefront worker page (Puppeteer) to load order rows for full-card PDF generation.
- * Query: token (JWT: typ order-card-pdf, orderId, purpose email-admin | email-customer).
- * Response: { pdfItemRows: [{ item, nominalInches }], pdfExport: { layout } } — email sizing only; admin UI download is unchanged.
+ * Query: token (JWT: typ order-card-pdf, orderId, purpose email-admin | email-customer | admin-download).
+ * Response: { pdfItemRows, pdfExport? } — omit pdfExport for admin-download so the worker matches in-app PDF sizing.
  */
 app.get("/api/orders/internal/order-items-for-pdf", async (req, res) => {
   try {
@@ -498,16 +499,34 @@ app.get("/api/orders/internal/order-items-for-pdf", async (req, res) => {
     if (payload.typ !== "order-card-pdf" || !payload.orderId) {
       return res.status(401).json({ error: "Invalid token" });
     }
-    const purpose = payload.purpose === "email-customer" ? "email-customer" : "email-admin";
+    const purpose =
+      payload.purpose === "email-customer"
+        ? "email-customer"
+        : payload.purpose === "admin-download"
+          ? "admin-download"
+          : "email-admin";
     const order = await Order.findById(payload.orderId).select("items").lean();
     if (!order) return res.status(404).json({ error: "Order not found" });
-    const { pdfItemRows } =
-      purpose === "email-customer"
-        ? filterItemsForCustomerEmailCardPdf(order.items || [])
-        : filterItemsForAdminEmailCardPdf(order.items || []);
-    res.json({
+
+    if (purpose === "email-customer") {
+      const { pdfItemRows } = filterItemsForCustomerEmailCardPdf(order.items || []);
+      return res.json({
+        pdfItemRows,
+        pdfExport: { layout: "email-customer" },
+      });
+    }
+    if (purpose === "admin-download") {
+      const { captureItemRows } = filterDesignedItemsForCardCapture(order.items || []);
+      const pdfItemRows = captureItemRows.map((r) => ({
+        item: r.item,
+        nominalInches: { w: 2.5, h: 3.5 },
+      }));
+      return res.json({ pdfItemRows });
+    }
+    const { pdfItemRows } = filterItemsForAdminEmailCardPdf(order.items || []);
+    return res.json({
       pdfItemRows,
-      pdfExport: { layout: purpose },
+      pdfExport: { layout: "email-admin" },
     });
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -1065,6 +1084,41 @@ app.get("/api/admin/orders/:id/card-images.zip", maybeRequireAdmin, async (req, 
     const code =
       /Code:\s*127|shared libraries|libatk-bridge|Failed to launch the browser/i.test(msg) ||
       /Capture page did not signal ready|waitForFunction failed|Navigation timeout/i.test(msg)
+        ? 503
+        : 500;
+    res.status(code).json({ error: msg });
+  }
+});
+
+/** Full-card PDF (html2canvas + jsPDF inside headless Chrome via /__order-card-pdf). Same layout as admin in-app PDF when headless works. */
+app.get("/api/admin/orders/:id/full-card.pdf", maybeRequireAdmin, async (req, res) => {
+  try {
+    if (!dbConnected()) {
+      console.warn("[orders] GET full-card.pdf 503: no DB");
+      return res.status(503).json({ error: "Database not connected" });
+    }
+    const orderLean = await Order.findById(req.params.id).lean();
+    if (!orderLean) {
+      console.warn(`[orders] GET full-card.pdf 404 id=${req.params.id}`);
+      return res.status(404).json({ error: "Order not found" });
+    }
+    const buf = await buildFullOrderCardPdfBufferHeadless(req.params.id, { purpose: "admin-download" });
+    if (!buf?.length) {
+      return res.status(503).json({
+        error:
+          "Headless PDF unavailable. Set PUBLIC_APP_URL (or ORDER_CARD_PDF_PAGE_URL) and JWT; ensure Puppeteer can open /__order-card-pdf.",
+      });
+    }
+    const ref = getOrderRef(orderLean);
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Disposition", `attachment; filename="order-${ref}-full-card.pdf"`);
+    return res.send(buf);
+  } catch (e) {
+    console.error(`[orders] full-card.pdf failed id=${req.params.id}:`, e?.message || e);
+    const msg = augmentPuppeteerLaunchError(e);
+    const code =
+      /Code:\s*127|shared libraries|libatk-bridge|Failed to launch the browser/i.test(msg) ||
+      /Navigation timeout|waitForFunction|timeout exceeded/i.test(msg)
         ? 503
         : 500;
     res.status(code).json({ error: msg });

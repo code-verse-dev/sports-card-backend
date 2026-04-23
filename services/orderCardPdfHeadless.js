@@ -7,12 +7,17 @@ function pdfTokenSecret() {
 
 /**
  * Short-lived JWT for the headless PDF worker (never send to browsers for customers).
- * @param {"email-admin" | "email-customer"} [purpose] — controls item filter + page sizes (see orderCardPdfExportMeta).
+ * @param {"email-admin" | "email-customer" | "admin-download"} [purpose] — item filter + layout (see orderCardPdfExportMeta + internal route).
  */
 export function signOrderCardPdfToken(orderId, purpose = "email-admin") {
   const secret = pdfTokenSecret();
   if (!secret || !orderId) return null;
-  const p = purpose === "email-customer" ? "email-customer" : "email-admin";
+  const p =
+    purpose === "email-customer"
+      ? "email-customer"
+      : purpose === "admin-download"
+        ? "admin-download"
+        : "email-admin";
   return jwt.sign({ orderId: String(orderId), typ: "order-card-pdf", purpose: p }, secret, { expiresIn: "12m" });
 }
 
@@ -21,7 +26,7 @@ export function signOrderCardPdfToken(orderId, purpose = "email-admin") {
  * Page sizing depends on `purpose`: admin notification email uses a 2.75″×3.75″ canvas; customer email uses ordered sizes
  * on PDF add-on lines only. Admin in-app “Download card PDF” does not use this path. Requires PUBLIC_APP_URL (or ORDER_CARD_PDF_PAGE_URL) and puppeteer.
  * @param {string} orderId Mongo order id
- * @param {{ purpose?: "email-admin" | "email-customer" }} [opts]
+ * @param {{ purpose?: "email-admin" | "email-customer" | "admin-download" }} [opts]
  * @returns {Promise<Buffer | null>}
  */
 export async function buildFullOrderCardPdfBufferHeadless(orderId, opts = {}) {
@@ -31,7 +36,12 @@ export async function buildFullOrderCardPdfBufferHeadless(orderId, opts = {}) {
     console.warn("[orderCardPdfHeadless] ORDER_CARD_PDF_JWT_SECRET or JWT_SECRET not set — skip headless PDF");
     return null;
   }
-  const purpose = opts.purpose === "email-customer" ? "email-customer" : "email-admin";
+  const purpose =
+    opts.purpose === "email-customer"
+      ? "email-customer"
+      : opts.purpose === "admin-download"
+        ? "admin-download"
+        : "email-admin";
   const token = signOrderCardPdfToken(orderId, purpose);
   if (!token) return null;
 
@@ -60,6 +70,7 @@ export async function buildFullOrderCardPdfBufferHeadless(orderId, opts = {}) {
   const browser = await puppeteer.launch(getPuppeteerLaunchOptions());
   try {
     const page = await browser.newPage();
+    await page.setBypassCSP(true).catch(() => {});
     await page.goto(url, { waitUntil: "domcontentloaded", timeout: gotoMs });
     await page.waitForFunction(
       () => Boolean(window.__ORDER_CARD_PDF_BASE64__ || window.__ORDER_CARD_PDF_ERR__),
