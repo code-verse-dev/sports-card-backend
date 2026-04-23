@@ -1106,7 +1106,7 @@ app.get("/api/admin/orders/:id/full-card.pdf", maybeRequireAdmin, async (req, re
     if (!buf?.length) {
       return res.status(503).json({
         error:
-          "Headless PDF unavailable. Set PUBLIC_APP_URL (or ORDER_CARD_PDF_PAGE_URL), JWT_SECRET (or ORDER_CARD_PDF_JWT_SECRET), API_PUBLIC_URL (so the worker can reach your API), and ensure Puppeteer can open /__order-card-pdf.",
+          "Headless PDF unavailable. Admin PDF uses the same capture as card-images.zip: set PUBLIC_APP_URL (or ORDER_CARD_CAPTURE_PAGE_URL), JWT_SECRET (or ORDER_CARD_PDF_JWT_SECRET), API_PUBLIC_URL, and Puppeteer on this server.",
       });
     }
     const ref = getOrderRef(orderLean);
