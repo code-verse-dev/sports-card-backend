@@ -65,6 +65,7 @@ export async function buildOrderCardImagesZipHeadless(order) {
   const entries = [];
   try {
     const page = await browser.newPage();
+    await page.setBypassCSP(true).catch(() => {});
     page.setDefaultNavigationTimeout(gotoMs);
     page.setDefaultTimeout(waitFnMs);
     page.on("console", (msg) => {
