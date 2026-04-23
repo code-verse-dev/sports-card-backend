@@ -69,6 +69,7 @@ export async function buildOrderCardImagesZipHeadless(order) {
       const suffix = captureItemRows.length > 1 ? `-line${lineIndex + 1}` : "";
       for (const side of ["front", "back"]) {
         const url = `${pageBase}?token=${encodeURIComponent(token)}&line=${lineIndex}&side=${side}`;
+        console.info("[orderCardCaptureHeadless] goto", url.slice(0, 120) + (url.length > 120 ? "…" : ""));
         await page.goto(url, { waitUntil: "domcontentloaded", timeout: gotoMs });
         await page.waitForFunction(
           () => Boolean(window.__ORDER_CARD_CAPTURE_OK__ || window.__ORDER_CARD_CAPTURE_ERR__),
@@ -81,6 +82,7 @@ export async function buildOrderCardImagesZipHeadless(order) {
         const jpegBuf = await handle.screenshot({ type: "jpeg", quality: 92 });
         const name = `${filenameBase}${suffix}-${side}.jpg`;
         entries.push({ name, buffer: Buffer.from(jpegBuf) });
+        console.info("[orderCardCaptureHeadless] shot ok", name, jpegBuf?.length ?? 0, "bytes");
       }
     }
     await page.close().catch(() => {});
