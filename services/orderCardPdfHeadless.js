@@ -1,6 +1,8 @@
 import jwt from "jsonwebtoken";
+import { Order } from "../models/Order.js";
 import { getPuppeteerLaunchOptions } from "./puppeteerLaunchConfig.js";
 import { workerApiBaseForHeadlessWorker } from "./workerJwtApiBase.js";
+import { buildFullOrderCardPdfFromCaptureScreenshots } from "./orderCardPdfFromCaptureHeadless.js";
 
 function pdfTokenSecret() {
   return String(process.env.ORDER_CARD_PDF_JWT_SECRET || process.env.JWT_SECRET || "").trim();
@@ -30,9 +32,9 @@ export function signOrderCardPdfToken(orderId, purpose = "email-admin") {
 }
 
 /**
- * Opens the storefront worker page in headless Chrome and returns a multi-page full-card PDF (html2canvas + jsPDF).
- * Page sizing depends on `purpose`: admin notification email uses a 2.75″×3.75″ canvas; customer email uses ordered sizes
- * on PDF add-on lines only. Admin “Download card PDF” uses purpose `admin-download`. Requires PUBLIC_APP_URL (or ORDER_CARD_PDF_PAGE_URL) and puppeteer.
+ * Headless full-card PDF.
+ * - **admin-download:** same Chrome screenshots as `card-images.zip`, assembled with PDFKit (matches zip visually).
+ * - **email-admin / email-customer:** storefront worker `/__order-card-pdf` (html2canvas + jsPDF) for nominal print sizes.
  * @param {string} orderId Mongo order id
  * @param {{ purpose?: "email-admin" | "email-customer" | "admin-download" }} [opts]
  * @returns {Promise<Buffer | null>}
@@ -50,6 +52,20 @@ export async function buildFullOrderCardPdfBufferHeadless(orderId, opts = {}) {
       : opts.purpose === "admin-download"
         ? "admin-download"
         : "email-admin";
+
+  if (purpose === "admin-download") {
+    try {
+      const order = await Order.findById(orderId).lean();
+      if (!order) return null;
+      const fromCapture = await buildFullOrderCardPdfFromCaptureScreenshots(order);
+      if (fromCapture?.length) return fromCapture;
+    } catch (e) {
+      console.error("[orderCardPdfHeadless] admin-download capture PDF failed:", e?.message || e);
+      throw e;
+    }
+    return null;
+  }
+
   const token = signOrderCardPdfToken(orderId, purpose);
   if (!token) return null;
 

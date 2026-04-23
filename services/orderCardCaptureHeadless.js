@@ -23,11 +23,11 @@ export function signOrderCardCaptureToken(orderId) {
 }
 
 /**
- * Zip of JPEG screenshots (Chrome layout) for each designed line item × front/back.
+ * Same JPEG sequence as the zip export: one buffer per line × (front, back), in order.
  * @param {{ items?: unknown[]; _id?: import("mongoose").Types.ObjectId; id?: string; orderCode?: string }|null} order
- * @returns {Promise<{ buffer: Buffer, filenameBase: string } | null>}
+ * @returns {Promise<{ entries: { name: string; buffer: Buffer }[]; filenameBase: string } | null>}
  */
-export async function buildOrderCardImagesZipHeadless(order) {
+export async function collectOrderCardCaptureJpegEntries(order) {
   if (process.env.DISABLE_HEADLESS_ORDER_CAPTURE === "1") return null;
   const secret = captureJwtSecret();
   if (!secret) {
@@ -163,6 +163,19 @@ export async function buildOrderCardImagesZipHeadless(order) {
     await browser.close().catch(() => {});
   }
 
+  return { entries, filenameBase };
+}
+
+/**
+ * Zip of JPEG screenshots (Chrome layout) for each designed line item × front/back.
+ * @param {{ items?: unknown[]; _id?: import("mongoose").Types.ObjectId; id?: string; orderCode?: string }|null} order
+ * @returns {Promise<{ buffer: Buffer, filenameBase: string } | null>}
+ */
+export async function buildOrderCardImagesZipHeadless(order) {
+  const collected = await collectOrderCardCaptureJpegEntries(order);
+  if (!collected) return null;
+
+  const { entries, filenameBase } = collected;
   const archive = archiver("zip", { zlib: { level: 6 } });
   const buffer = await new Promise((resolve, reject) => {
     const chunks = [];
