@@ -11,6 +11,17 @@ function hasDesignSnapshot(it) {
   return it?.designSnapshot && typeof it.designSnapshot === "object" && Object.keys(it.designSnapshot).length > 0;
 }
 
+/** Admin “download card images” / Puppeteer capture: every line with a non-empty design snapshot. */
+export function filterDesignedItemsForCardCapture(items) {
+  /** @type {{ item: object }[]} */
+  const captureItemRows = [];
+  for (const it of items || []) {
+    if (!hasDesignSnapshot(it)) continue;
+    captureItemRows.push({ item: it });
+  }
+  return { captureItemRows };
+}
+
 /** Admin order-notification email: every custom design at fixed 2.75″×3.75″ canvas (not builder / not admin download). */
 export function filterItemsForAdminEmailCardPdf(items) {
   /** @type {{ item: object, nominalInches: { w: number, h: number } }[]} */

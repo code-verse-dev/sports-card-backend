@@ -254,7 +254,7 @@ router.post("/templates", requireCustomer, async (req, res) => {
     if (!dbConnected()) return res.status(503).json({ error: "Saved designs not available" });
     const userId = req.customerUser?._id;
     if (!userId) return res.status(401).json({ error: "Unauthorized" });
-    const { templateId, templateName, name, designSnapshot, designFontOverrides } = req.body || {};
+    const { templateId, templateName, name, designSnapshot, designFontOverrides, cartSelection } = req.body || {};
     const tid = String(templateId || "").trim();
     if (!tid) return res.status(400).json({ error: "templateId required" });
     const doc = await UserSavedDesign.create({
@@ -264,6 +264,7 @@ router.post("/templates", requireCustomer, async (req, res) => {
       name: name != null ? String(name).trim() : undefined,
       designSnapshot: designSnapshot && typeof designSnapshot === "object" ? designSnapshot : {},
       designFontOverrides: designFontOverrides && typeof designFontOverrides === "object" ? designFontOverrides : {},
+      cartSelection: cartSelection && typeof cartSelection === "object" ? cartSelection : undefined,
     });
     const out = doc.toObject();
     res.status(201).json({ ...out, id: out._id?.toString() });
@@ -294,11 +295,12 @@ router.patch("/templates/:id", requireCustomer, async (req, res) => {
     if (!userId) return res.status(401).json({ error: "Unauthorized" });
     const doc = await UserSavedDesign.findOne({ _id: req.params.id, userId });
     if (!doc) return res.status(404).json({ error: "Saved design not found" });
-    const { name, designSnapshot, designFontOverrides, templateName } = req.body || {};
+    const { name, designSnapshot, designFontOverrides, templateName, cartSelection } = req.body || {};
     if (name !== undefined) doc.name = String(name).trim() || undefined;
     if (templateName !== undefined) doc.templateName = String(templateName).trim() || undefined;
     if (designSnapshot !== undefined && typeof designSnapshot === "object") doc.designSnapshot = designSnapshot;
     if (designFontOverrides !== undefined && typeof designFontOverrides === "object") doc.designFontOverrides = designFontOverrides;
+    if (cartSelection !== undefined) doc.cartSelection = cartSelection && typeof cartSelection === "object" ? cartSelection : undefined;
     await doc.save();
     const out = doc.toObject();
     res.json({ ...out, id: out._id?.toString() });
