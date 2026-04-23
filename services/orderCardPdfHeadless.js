@@ -1,5 +1,6 @@
 import jwt from "jsonwebtoken";
 import { getPuppeteerLaunchOptions } from "./puppeteerLaunchConfig.js";
+import { workerApiBaseForHeadlessWorker } from "./workerJwtApiBase.js";
 
 function pdfTokenSecret() {
   return String(process.env.ORDER_CARD_PDF_JWT_SECRET || process.env.JWT_SECRET || "").trim();
@@ -18,13 +19,20 @@ export function signOrderCardPdfToken(orderId, purpose = "email-admin") {
       : purpose === "admin-download"
         ? "admin-download"
         : "email-admin";
-  return jwt.sign({ orderId: String(orderId), typ: "order-card-pdf", purpose: p }, secret, { expiresIn: "12m" });
+  const workerApiBase = workerApiBaseForHeadlessWorker();
+  const payload = {
+    orderId: String(orderId),
+    typ: "order-card-pdf",
+    purpose: p,
+    ...(workerApiBase ? { workerApiBase } : {}),
+  };
+  return jwt.sign(payload, secret, { expiresIn: "12m" });
 }
 
 /**
  * Opens the storefront worker page in headless Chrome and returns a multi-page full-card PDF (html2canvas + jsPDF).
  * Page sizing depends on `purpose`: admin notification email uses a 2.75″×3.75″ canvas; customer email uses ordered sizes
- * on PDF add-on lines only. Admin in-app “Download card PDF” does not use this path. Requires PUBLIC_APP_URL (or ORDER_CARD_PDF_PAGE_URL) and puppeteer.
+ * on PDF add-on lines only. Admin “Download card PDF” uses purpose `admin-download`. Requires PUBLIC_APP_URL (or ORDER_CARD_PDF_PAGE_URL) and puppeteer.
  * @param {string} orderId Mongo order id
  * @param {{ purpose?: "email-admin" | "email-customer" | "admin-download" }} [opts]
  * @returns {Promise<Buffer | null>}
@@ -67,15 +75,53 @@ export async function buildFullOrderCardPdfBufferHeadless(orderId, opts = {}) {
   const gotoMs = Math.max(30000, Number(process.env.ORDER_CARD_PDF_GOTO_TIMEOUT_MS || 180000));
   const waitFnMs = Math.max(60000, Number(process.env.ORDER_CARD_PDF_WAIT_TIMEOUT_MS || 300000));
 
-  const browser = await puppeteer.launch(getPuppeteerLaunchOptions());
+  const launchOpts = getPuppeteerLaunchOptions();
+  console.info(
+    "[orderCardPdfHeadless] chromium executable:",
+    launchOpts.executablePath || "(puppeteer bundled — needs OS libs, see puppeteerLaunchConfig.js)"
+  );
+  const browser = await puppeteer.launch(launchOpts);
   try {
     const page = await browser.newPage();
     await page.setBypassCSP(true).catch(() => {});
+    page.setDefaultNavigationTimeout(gotoMs);
+    page.setDefaultTimeout(waitFnMs);
+    page.on("pageerror", (err) => {
+      console.error("[orderCardPdfHeadless] pageerror:", err?.message || err);
+    });
+    page.on("response", (res) => {
+      const u = res.url();
+      if (u.includes("order-items-for-pdf") && res.status() >= 400) {
+        console.warn("[orderCardPdfHeadless] PDF items API HTTP", res.status(), u.slice(0, 200));
+      }
+    });
+    let safeLog = url;
+    try {
+      const u = new URL(url);
+      safeLog = `${u.origin}${u.pathname}?token=(redacted)`;
+    } catch {
+      /* keep */
+    }
+    console.info("[orderCardPdfHeadless] goto", safeLog);
     await page.goto(url, { waitUntil: "domcontentloaded", timeout: gotoMs });
-    await page.waitForFunction(
-      () => Boolean(window.__ORDER_CARD_PDF_BASE64__ || window.__ORDER_CARD_PDF_ERR__),
-      { timeout: waitFnMs }
-    );
+    try {
+      await page.waitForFunction(
+        () => Boolean(window.__ORDER_CARD_PDF_BASE64__ || window.__ORDER_CARD_PDF_ERR__),
+        { timeout: waitFnMs }
+      );
+    } catch (waitErr) {
+      const snap = await page.evaluate(() => ({
+        href: window.location.href,
+        err: window.__ORDER_CARD_PDF_ERR__,
+        b64Len: typeof window.__ORDER_CARD_PDF_BASE64__ === "string" ? window.__ORDER_CARD_PDF_BASE64__.length : 0,
+        text: document.body?.innerText ? document.body.innerText.slice(0, 800) : "",
+        title: document.title,
+      }));
+      console.error("[orderCardPdfHeadless] waitForFunction failed", { snap, waitErr: waitErr?.message || waitErr });
+      throw new Error(
+        `PDF worker did not signal ready: ${waitErr?.message || waitErr}. workerErr=${snap.err ?? "(none)"} title=${snap.title} textPreview=${JSON.stringify((snap.text || "").slice(0, 200))}`
+      );
+    }
     const err = await page.evaluate(() => window.__ORDER_CARD_PDF_ERR__);
     if (err) throw new Error(String(err));
     const b64 = await page.evaluate(() => window.__ORDER_CARD_PDF_BASE64__);

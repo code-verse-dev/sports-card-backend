@@ -3,6 +3,7 @@ import archiver from "archiver";
 import { getOrderRef } from "./publicCodes.js";
 import { filterDesignedItemsForCardCapture } from "./orderCardPdfExportMeta.js";
 import { getPuppeteerLaunchOptions } from "./puppeteerLaunchConfig.js";
+import { workerApiBaseForHeadlessWorker } from "./workerJwtApiBase.js";
 
 function captureJwtSecret() {
   return String(process.env.ORDER_CARD_PDF_JWT_SECRET || process.env.JWT_SECRET || "").trim();
@@ -12,7 +13,13 @@ function captureJwtSecret() {
 export function signOrderCardCaptureToken(orderId) {
   const secret = captureJwtSecret();
   if (!secret || !orderId) return null;
-  return jwt.sign({ orderId: String(orderId), typ: "order-card-capture" }, secret, { expiresIn: "12m" });
+  const workerApiBase = workerApiBaseForHeadlessWorker();
+  const payload = {
+    orderId: String(orderId),
+    typ: "order-card-capture",
+    ...(workerApiBase ? { workerApiBase } : {}),
+  };
+  return jwt.sign(payload, secret, { expiresIn: "12m" });
 }
 
 /**
