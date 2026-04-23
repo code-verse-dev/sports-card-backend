@@ -1,3 +1,5 @@
+import fs from "fs";
+
 /**
  * Shared Chromium launch options for headless PDF / card capture.
  *
@@ -15,12 +17,52 @@
  * Or set `PUPPETEER_EXECUTABLE_PATH` / `CHROME_BIN` to a full Chrome/Chromium binary that
  * already matches your OS (e.g. `/usr/bin/chromium` or `/usr/bin/google-chrome-stable`).
  */
-export function getPuppeteerLaunchOptions() {
-  const executablePath =
+
+function resolveChromiumExecutablePath() {
+  const fromEnv =
     String(process.env.PUPPETEER_EXECUTABLE_PATH || process.env.CHROME_BIN || "").trim() || undefined;
+  if (fromEnv) return fromEnv;
+  if (process.platform !== "linux") return undefined;
+  const candidates = [
+    "/usr/bin/chromium",
+    "/usr/bin/chromium-browser",
+    "/usr/bin/google-chrome-stable",
+    "/usr/bin/google-chrome",
+  ];
+  for (const p of candidates) {
+    try {
+      if (fs.existsSync(p)) return p;
+    } catch {
+      /* ignore */
+    }
+  }
+  return undefined;
+}
+
+export function getPuppeteerLaunchOptions() {
+  const executablePath = resolveChromiumExecutablePath();
   return {
     headless: true,
     ...(executablePath ? { executablePath } : {}),
     args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
   };
+}
+
+/** Turn Puppeteer “missing .so” / exit 127 into an actionable API message. */
+export function augmentPuppeteerLaunchError(err) {
+  const raw = err instanceof Error ? err.message : String(err);
+  if (
+    raw.includes("libatk-bridge") ||
+    raw.includes("shared libraries") ||
+    raw.includes("Code: 127") ||
+    raw.includes("error while loading shared libraries")
+  ) {
+    return (
+      `${raw} ` +
+      "| Fix: on Ubuntu/Debian run: sudo apt-get install -y libatk-bridge2.0-0 libgtk-3-0 libgbm1 libnss3 libdrm2 libcups2 libasound2 libxdamage1 libxfixes3 libxrandr2 " +
+      "(full list in puppeteerLaunchConfig.js). Or install chromium: sudo apt-get install -y chromium-browser " +
+      "and set PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium. Shared hosting without apt often cannot run Chrome — use a VPS or Docker."
+    );
+  }
+  return raw;
 }

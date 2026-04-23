@@ -43,6 +43,7 @@ import {
   filterDesignedItemsForCardCapture,
 } from "./services/orderCardPdfExportMeta.js";
 import { buildOrderCardImagesZipHeadless } from "./services/orderCardCaptureHeadless.js";
+import { augmentPuppeteerLaunchError } from "./services/puppeteerLaunchConfig.js";
 import { profileFromBody, setCustomerPasswordById } from "./services/customerProfile.js";
 import {
   ensureUniqueOrderCode,
@@ -1060,7 +1061,9 @@ app.get("/api/admin/orders/:id/card-images.zip", maybeRequireAdmin, async (req, 
     return res.send(zipResult.buffer);
   } catch (e) {
     console.error(`[orders] card-images.zip failed id=${req.params.id}:`, e?.message || e);
-    res.status(500).json({ error: e.message });
+    const msg = augmentPuppeteerLaunchError(e);
+    const code = /Code:\s*127|shared libraries|libatk-bridge|Failed to launch the browser/i.test(msg) ? 503 : 500;
+    res.status(code).json({ error: msg });
   }
 });
 
