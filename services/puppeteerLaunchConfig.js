@@ -41,9 +41,11 @@ function resolveChromiumExecutablePath() {
 
 export function getPuppeteerLaunchOptions() {
   const executablePath = resolveChromiumExecutablePath();
+  const ignoreHTTPSErrors = String(process.env.PUPPETEER_IGNORE_HTTPS_ERRORS || "").trim() === "1";
   return {
     headless: true,
     ...(executablePath ? { executablePath } : {}),
+    ...(ignoreHTTPSErrors ? { ignoreHTTPSErrors: true } : {}),
     args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
   };
 }

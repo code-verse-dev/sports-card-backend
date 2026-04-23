@@ -65,16 +65,61 @@ export async function buildOrderCardImagesZipHeadless(order) {
   const entries = [];
   try {
     const page = await browser.newPage();
+    page.setDefaultNavigationTimeout(gotoMs);
+    page.setDefaultTimeout(waitFnMs);
+    page.on("console", (msg) => {
+      const t = msg.text();
+      const ty = msg.type();
+      if (ty === "error" || ty === "warn" || t.includes("[order-card-capture]")) {
+        console.info("[orderCardCaptureHeadless] page console:", ty, t.slice(0, 800));
+      }
+    });
+    page.on("pageerror", (err) => {
+      console.error("[orderCardCaptureHeadless] pageerror:", err?.message || err);
+    });
+    page.on("requestfailed", (req) => {
+      const f = req.failure();
+      console.warn("[orderCardCaptureHeadless] requestfailed:", req.url().slice(0, 200), f?.errorText || "");
+    });
+    page.on("response", (res) => {
+      const u = res.url();
+      if (u.includes("order-items-for-capture") && res.status() >= 400) {
+        console.warn("[orderCardCaptureHeadless] capture API HTTP", res.status(), u.slice(0, 160));
+      }
+    });
+
     for (let lineIndex = 0; lineIndex < captureItemRows.length; lineIndex++) {
       const suffix = captureItemRows.length > 1 ? `-line${lineIndex + 1}` : "";
       for (const side of ["front", "back"]) {
         const url = `${pageBase}?token=${encodeURIComponent(token)}&line=${lineIndex}&side=${side}`;
-        console.info("[orderCardCaptureHeadless] goto", url.slice(0, 120) + (url.length > 120 ? "…" : ""));
+        let safeLog = url;
+        try {
+          const u = new URL(url);
+          safeLog = `${u.origin}${u.pathname}?line=${lineIndex}&side=${side}&token=(redacted)`;
+        } catch {
+          /* keep truncated */
+        }
+        console.info("[orderCardCaptureHeadless] goto", safeLog);
         await page.goto(url, { waitUntil: "domcontentloaded", timeout: gotoMs });
-        await page.waitForFunction(
-          () => Boolean(window.__ORDER_CARD_CAPTURE_OK__ || window.__ORDER_CARD_CAPTURE_ERR__),
-          { timeout: waitFnMs }
-        );
+        try {
+          await page.waitForFunction(
+            () => Boolean(window.__ORDER_CARD_CAPTURE_OK__ || window.__ORDER_CARD_CAPTURE_ERR__),
+            { timeout: waitFnMs }
+          );
+        } catch (waitErr) {
+          const snap = await page.evaluate(() => ({
+            href: window.location.href,
+            err: window.__ORDER_CARD_CAPTURE_ERR__,
+            ok: window.__ORDER_CARD_CAPTURE_OK__,
+            text: document.body?.innerText ? document.body.innerText.slice(0, 800) : "",
+            title: document.title,
+          }));
+          console.error("[orderCardCaptureHeadless] waitForFunction failed", { side, lineIndex, snap, waitErr: waitErr?.message });
+          throw new Error(
+            `Capture page did not signal ready (${side}, line ${lineIndex}): ${waitErr?.message || waitErr}. ` +
+              `workerErr=${snap.err ?? "(none)"} title=${snap.title} textPreview=${JSON.stringify((snap.text || "").slice(0, 200))}`
+          );
+        }
         const err = await page.evaluate(() => window.__ORDER_CARD_CAPTURE_ERR__);
         if (err) throw new Error(String(err));
         const handle = await page.$("#pdf-export-card");
