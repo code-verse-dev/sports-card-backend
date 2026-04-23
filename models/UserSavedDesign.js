@@ -12,6 +12,8 @@ const userSavedDesignSchema = new mongoose.Schema(
     name: { type: String, trim: true },
     designSnapshot: { type: mongoose.Schema.Types.Mixed, default: {} },
     designFontOverrides: { type: mongoose.Schema.Types.Mixed, default: {} },
+    /** Size / quantity / PDF selection when the user saved (mirrors cart line shape for reopening the creator). */
+    cartSelection: { type: mongoose.Schema.Types.Mixed, default: undefined },
   },
   { timestamps: true }
 );

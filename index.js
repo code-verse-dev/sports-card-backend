@@ -37,7 +37,12 @@ import { AdminUser, hashPassword } from "./models/AdminUser.js";
 import { CustomerUser, hashCustomerPassword } from "./models/CustomerUser.js";
 import { sendOrderStatusChangedCustomerEmail, sendTrackingInfoCustomerEmail } from "./services/orderEmails.js";
 import { getOrderCustomerView } from "./services/orderCustomer.js";
-import { filterItemsForAdminEmailCardPdf, filterItemsForCustomerEmailCardPdf } from "./services/orderCardPdfExportMeta.js";
+import {
+  filterItemsForAdminEmailCardPdf,
+  filterItemsForCustomerEmailCardPdf,
+  filterDesignedItemsForCardCapture,
+} from "./services/orderCardPdfExportMeta.js";
+import { buildOrderCardImagesZipHeadless } from "./services/orderCardCaptureHeadless.js";
 import { profileFromBody, setCustomerPasswordById } from "./services/customerProfile.js";
 import {
   ensureUniqueOrderCode,
@@ -503,6 +508,35 @@ app.get("/api/orders/internal/order-items-for-pdf", async (req, res) => {
       pdfItemRows,
       pdfExport: { layout: purpose },
     });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+/**
+ * Storefront worker `/__order-card-capture` (Puppeteer): JWT typ `order-card-capture`, same secret as PDF worker.
+ * Response: `{ captureItemRows: [{ item }] }` — one row per cart line with a non-empty design snapshot.
+ */
+app.get("/api/orders/internal/order-items-for-capture", async (req, res) => {
+  try {
+    if (!dbConnected()) return res.status(503).json({ error: "Database not configured" });
+    const token = String(req.query.token || "").trim();
+    if (!token) return res.status(400).json({ error: "token required" });
+    const secret = orderPdfJwtSecret();
+    if (!secret) return res.status(503).json({ error: "JWT secret not configured" });
+    let payload;
+    try {
+      payload = jwt.verify(token, secret);
+    } catch {
+      return res.status(401).json({ error: "Invalid or expired token" });
+    }
+    if (payload.typ !== "order-card-capture" || !payload.orderId) {
+      return res.status(401).json({ error: "Invalid token" });
+    }
+    const order = await Order.findById(payload.orderId).select("items").lean();
+    if (!order) return res.status(404).json({ error: "Order not found" });
+    const { captureItemRows } = filterDesignedItemsForCardCapture(order.items || []);
+    res.json({ captureItemRows });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
@@ -993,6 +1027,39 @@ app.get("/api/admin/orders/:id/print-pdf", maybeRequireAdmin, async (req, res) =
     return res.send(buf);
   } catch (e) {
     console.error(`[orders] print-pdf failed id=${req.params.id}:`, e?.message || e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+/** Zip of card faces (JPEG) via headless Chrome + storefront worker. Requires PUBLIC_APP_URL (or ORDER_CARD_CAPTURE_PAGE_URL) and Puppeteer. */
+app.get("/api/admin/orders/:id/card-images.zip", maybeRequireAdmin, async (req, res) => {
+  try {
+    if (!dbConnected()) {
+      console.warn("[orders] GET card-images.zip 503: no DB");
+      return res.status(503).json({ error: "Database not connected" });
+    }
+    const order = await Order.findById(req.params.id).lean();
+    if (!order) {
+      console.warn(`[orders] GET card-images.zip 404 id=${req.params.id}`);
+      return res.status(404).json({ error: "Order not found" });
+    }
+    const zipResult = await buildOrderCardImagesZipHeadless(order);
+    if (!zipResult?.buffer?.length) {
+      const { captureItemRows } = filterDesignedItemsForCardCapture(order.items || []);
+      if (captureItemRows.length === 0) {
+        return res.status(404).json({ error: "No designed card lines to export" });
+      }
+      return res.status(503).json({
+        error:
+          "Headless capture unavailable. Set PUBLIC_APP_URL (storefront) and JWT secret; ensure Puppeteer runs on this server. Optional: ORDER_CARD_CAPTURE_PAGE_URL.",
+      });
+    }
+    const ref = getOrderRef(order);
+    res.setHeader("Content-Type", "application/zip");
+    res.setHeader("Content-Disposition", `attachment; filename="order-${ref}-card-images.zip"`);
+    return res.send(zipResult.buffer);
+  } catch (e) {
+    console.error(`[orders] card-images.zip failed id=${req.params.id}:`, e?.message || e);
     res.status(500).json({ error: e.message });
   }
 });
