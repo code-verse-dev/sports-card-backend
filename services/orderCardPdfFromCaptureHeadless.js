@@ -2,16 +2,31 @@ import PDFDocument from "pdfkit";
 import imageSize from "image-size";
 import { collectOrderCardCaptureJpegEntries } from "./orderCardCaptureHeadless.js";
 
-/** Same long-edge rule as storefront `exportOrderCardPdf.tsx` (print-consistent multipage PDF). */
-const PDF_DOWNLOAD_LONG_EDGE_IN = 3.75;
 const PT_PER_IN = 72;
+/** Fixed print page (inches) — admin full-card PDF matches standard tall card sheet sizing. */
+const PAGE_W_IN = 2.75;
+const PAGE_H_IN = 3.75;
 
-function pagePtsFromCapturePixels(wPx, hPx) {
-  const w = Math.max(1, wPx);
-  const h = Math.max(1, hPx);
-  const longPx = Math.max(w, h);
-  const inchesPerPx = PDF_DOWNLOAD_LONG_EDGE_IN / longPx;
-  return { w: w * inchesPerPx * PT_PER_IN, h: h * inchesPerPx * PT_PER_IN };
+/** Fit image in page with uniform scale (no stretch); letterbox on white. */
+function containImageRect(iw, ih, pw, ph) {
+  const ar = Math.max(1, iw) / Math.max(1, ih);
+  const pageAr = pw / ph;
+  let dw;
+  let dh;
+  let x;
+  let y;
+  if (ar > pageAr) {
+    dw = pw;
+    dh = pw / ar;
+    x = 0;
+    y = (ph - dh) / 2;
+  } else {
+    dh = ph;
+    dw = ph * ar;
+    x = (pw - dw) / 2;
+    y = 0;
+  }
+  return { x, y, dw, dh };
 }
 
 /**
@@ -32,13 +47,16 @@ export async function buildFullOrderCardPdfFromCaptureScreenshots(order) {
     doc.on("end", () => resolve(Buffer.concat(chunks)));
 
     try {
+      const pw = PAGE_W_IN * PT_PER_IN;
+      const ph = PAGE_H_IN * PT_PER_IN;
       for (const { buffer } of collected.entries) {
         const dims = imageSize(buffer);
         const iw = dims.width ?? 1;
         const ih = dims.height ?? 1;
-        const { w: pw, h: ph } = pagePtsFromCapturePixels(iw, ih);
         doc.addPage({ size: [pw, ph], margin: 0 });
-        doc.image(buffer, 0, 0, { width: pw, height: ph });
+        doc.fillColor("#ffffff").rect(0, 0, pw, ph).fill();
+        const { x, y, dw, dh } = containImageRect(iw, ih, pw, ph);
+        doc.image(buffer, x, y, { width: dw, height: dh });
       }
       doc.end();
     } catch (e) {
