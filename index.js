@@ -1062,7 +1062,11 @@ app.get("/api/admin/orders/:id/card-images.zip", maybeRequireAdmin, async (req, 
   } catch (e) {
     console.error(`[orders] card-images.zip failed id=${req.params.id}:`, e?.message || e);
     const msg = augmentPuppeteerLaunchError(e);
-    const code = /Code:\s*127|shared libraries|libatk-bridge|Failed to launch the browser/i.test(msg) ? 503 : 500;
+    const code =
+      /Code:\s*127|shared libraries|libatk-bridge|Failed to launch the browser/i.test(msg) ||
+      /Capture page did not signal ready|waitForFunction failed|Navigation timeout/i.test(msg)
+        ? 503
+        : 500;
     res.status(code).json({ error: msg });
   }
 });
