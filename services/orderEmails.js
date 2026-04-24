@@ -259,7 +259,7 @@ export async function sendOrderPlacedAdminEmail(order, opts = {}) {
     ? `<p style="margin:16px 0 0;">${emailButton(adminUrl, "Open orders in admin")}</p>`
     : "";
   const attachNote = fullCardPdfBuffer
-    ? `<p style="margin:16px 0 0;font-size:14px;color:#475569;">Attached: <strong>full card PDF</strong> for fulfillment — each page is a <strong>2.75″×3.75″</strong> canvas (composed front &amp; back per design). Admin download in the app still uses the original builder sizing.</p>`
+    ? `<p style="margin:16px 0 0;font-size:14px;color:#475569;">Attached: <strong>full card PDF</strong> for fulfillment — same pipeline as <strong>Admin → Orders → Download card PDF</strong> (Chrome capture per design, then PDF assembly).</p>`
     : fallbackSnapshotPdf
       ? `<p style="margin:16px 0 0;font-size:14px;color:#475569;"><strong>Attached PDF is upload photos only</strong> — one page per customer image file, <em>not</em> the finished card (no template frame, text, or layout). That attachment appears when automatic full-card rendering did not run. For composed front &amp; back: Admin → Orders → open this order → <strong>Download card PDF</strong>. To get composed cards in email automatically: set <code>PUBLIC_APP_URL</code> (live storefront), <code>JWT_SECRET</code>, install Puppeteer on this server, and build the storefront with <code>VITE_API_URL</code> pointing at this API so headless Chrome can load uploads.</p>`
       : `<p style="margin:16px 0 0;font-size:14px;color:#475569;">No PDF attached (no design snapshot images and headless card PDF unavailable).</p>`;
@@ -327,7 +327,7 @@ export async function notifyOrderPlaced(order) {
   let adminCardPdfBuffer = null;
   let customerCardPdfBuffer = null;
   try {
-    const adminTask = buildFullOrderCardPdfBufferHeadless(id, { purpose: "email-admin" }).catch((e) => {
+    const adminTask = buildFullOrderCardPdfBufferHeadless(id, { purpose: "admin-download" }).catch((e) => {
       console.error("[orderEmails] Headless admin email card PDF failed:", e?.message || e);
       return null;
     });
