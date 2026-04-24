@@ -356,6 +356,7 @@ export async function notifyOrderPlaced(order) {
 const STATUS_LABELS = {
   pending: "Pending",
   pending_payment: "Awaiting payment",
+  payment_failed: "Payment failed",
   confirmed: "Confirmed",
   in_production: "In production",
   shipped: "Shipped",

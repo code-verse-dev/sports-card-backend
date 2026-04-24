@@ -4,6 +4,8 @@ let nextId = 1;
 
 export const ORDER_STATUSES = [
   "pending",
+  "pending_payment",
+  "payment_failed",
   "confirmed",
   "in_production",
   "shipped",

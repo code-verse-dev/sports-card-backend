@@ -13,6 +13,7 @@ import { requireAdmin } from "./middleware/auth.js";
 import adminAuthRouter from "./routes/adminAuth.js";
 import userAuthRouter from "./routes/userAuth.js";
 import stripeRouter from "./routes/stripe.js";
+import { handleRawStripeWebhook } from "./routes/stripeWebhook.js";
 import { registerUploadsRouter } from "./uploads-router.js";
 import { listCategories, listSubcategories, upsertCategory, upsertSubcategory, deleteCategoryById, deleteSubcategoryById, getCategoryById, getSubcategoryById } from "./categories-db.js";
 import { DEFAULT_CATEGORIES, DEFAULT_SUBCATEGORIES } from "./seed-categories.js";
@@ -64,6 +65,12 @@ const PORT = Number(process.env.PORT) || 4043;
 const HOST = (process.env.HOST && String(process.env.HOST).trim() && process.env.HOST !== "null") ? process.env.HOST.trim() : "0.0.0.0";
 
 app.use(cors({ origin: true, credentials: true, allowedHeaders: ["Content-Type", "Authorization"] }));
+app.post("/api/stripe/webhook", express.raw({ type: "application/json" }), (req, res) => {
+  handleRawStripeWebhook(req, res).catch((e) => {
+    console.error("[stripe-webhook] unhandled:", e?.message || e);
+    if (!res.headersSent) res.status(500).send("Internal error");
+  });
+});
 app.use(express.json({ limit: "10mb" }));
 
 /** Log every request when it finishes (so you see traffic in the terminal, not only `[orders]`). */
@@ -110,6 +117,8 @@ function orderToJson(doc) {
     items: o.items,
     totalCents: o.totalCents,
     shippingCents: o.shippingCents,
+    taxCents: o.taxCents != null ? o.taxCents : undefined,
+    paymentLastError: o.paymentLastError || undefined,
     notes: o.notes,
     createAccount: o.createAccount,
     trackingCarrier: o.trackingCarrier,
@@ -118,7 +127,7 @@ function orderToJson(doc) {
   };
 }
 
-const ORDER_STATUSES_WITH_PAYMENT = [...new Set([...ORDER_STATUSES, "pending_payment"])];
+const ORDER_STATUSES_WITH_PAYMENT = [...new Set([...ORDER_STATUSES, "pending_payment", "payment_failed"])];
 
 // ---------- Public: Prices ----------
 app.get("/api/prices", async (req, res) => {
