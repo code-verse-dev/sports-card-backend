@@ -1,5 +1,6 @@
 import PDFDocument from "pdfkit";
 import { getOrderRef } from "./publicCodes.js";
+import { httpFetch } from "./httpFetch.js";
 
 const UPLOAD_ID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -44,7 +45,7 @@ async function fetchImageBuffer(src, apiBase) {
   }
 
   try {
-    const res = await fetch(url);
+    const res = await httpFetch(url);
     if (!res.ok) return null;
     const ab = await res.arrayBuffer();
     return Buffer.from(ab);

@@ -23,6 +23,51 @@ export function profileFromBody(c) {
  * Create or update CustomerUser (guest allowed: no password).
  * Merges profile fields. Returns the document.
  */
+/**
+ * Guest checkout: if the draft order was tied to `previousCustomerId` and that user is still
+ * an unregistered guest, update that user's email in place instead of creating a second CustomerUser.
+ * Falls back to upsertCustomerFromCheckout when the guest is registered or the new email is taken.
+ */
+export async function migrateGuestCustomerEmailOnCheckoutPatch({ previousCustomerId, customer }) {
+  const p = profileFromBody(customer);
+  if (!p || !previousCustomerId) return upsertCustomerFromCheckout(customer);
+  const prevUser = await CustomerUser.findById(previousCustomerId);
+  if (!prevUser || prevUser.isRegistered) {
+    return upsertCustomerFromCheckout(customer);
+  }
+  const newEmail = p.email;
+  if (!newEmail) return upsertCustomerFromCheckout(customer);
+  if (String(prevUser.email).toLowerCase() === newEmail) {
+    if (p.firstName !== undefined) prevUser.firstName = p.firstName;
+    if (p.lastName !== undefined) prevUser.lastName = p.lastName;
+    if (p.phone !== undefined) prevUser.phone = p.phone;
+    if (p.address !== undefined) prevUser.address = p.address;
+    if (p.addressLine2 !== undefined) prevUser.addressLine2 = p.addressLine2;
+    if (p.city !== undefined) prevUser.city = p.city;
+    if (p.state !== undefined) prevUser.state = p.state;
+    if (p.zip !== undefined) prevUser.zip = p.zip;
+    if (p.country !== undefined) prevUser.country = p.country;
+    await prevUser.save();
+    return prevUser;
+  }
+  const conflict = await CustomerUser.findOne({ email: newEmail, _id: { $ne: prevUser._id } }).select("_id").lean();
+  if (conflict) {
+    return upsertCustomerFromCheckout(customer);
+  }
+  prevUser.email = newEmail;
+  if (p.firstName !== undefined) prevUser.firstName = p.firstName;
+  if (p.lastName !== undefined) prevUser.lastName = p.lastName;
+  if (p.phone !== undefined) prevUser.phone = p.phone;
+  if (p.address !== undefined) prevUser.address = p.address;
+  if (p.addressLine2 !== undefined) prevUser.addressLine2 = p.addressLine2;
+  if (p.city !== undefined) prevUser.city = p.city;
+  if (p.state !== undefined) prevUser.state = p.state;
+  if (p.zip !== undefined) prevUser.zip = p.zip;
+  if (p.country !== undefined) prevUser.country = p.country;
+  await prevUser.save();
+  return prevUser;
+}
+
 export async function upsertCustomerFromCheckout(customer) {
   const p = profileFromBody(customer);
   if (!p) return null;

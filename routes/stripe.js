@@ -6,15 +6,25 @@ import { dbConnected } from "../db.js";
 import { optionalCustomer } from "../middleware/auth.js";
 import { notifyOrderPlaced } from "../services/orderEmails.js";
 import { invalidateAdminStatsCache } from "../services/adminStatsCache.js";
-import { upsertCustomerFromCheckout } from "../services/customerProfile.js";
+import {
+  upsertCustomerFromCheckout,
+  migrateGuestCustomerEmailOnCheckoutPatch,
+} from "../services/customerProfile.js";
 import { getOrderCustomerView } from "../services/orderCustomer.js";
 import { CustomerUser } from "../models/CustomerUser.js";
 import {
   isPayPalConfigured,
+  getPayPalApiEnvironment,
   paypalCreateOrder,
   paypalCaptureOrder,
+  paypalCancelOrder,
   paypalParseCapture,
 } from "../services/paypalRest.js";
+import {
+  finalizeStripeDraftOrderFromSucceededIntent,
+  markStripeDraftPaymentFailed,
+  markStripeDraftPaymentFailedByOrderId,
+} from "../services/stripeOrderFinalize.js";
 
 const router = Router();
 const stripe = process.env.STRIPE_SECRET_KEY ? new Stripe(process.env.STRIPE_SECRET_KEY, { apiVersion: "2024-11-20.acacia" }) : null;
@@ -53,6 +63,245 @@ function computeHostedCheckoutSessionAmountCents(items, shippingCents) {
 
 function isLikelyMongoObjectId(s) {
   return typeof s === "string" && s.length === 24 && /^[a-f0-9]+$/i.test(s);
+}
+
+function normalizePhoneDigits(s) {
+  return String(s || "").replace(/\D/g, "");
+}
+
+/**
+ * Same access rules as cancel-checkout-draft / PATCH guest (plus linkedDraftOrderId + phone, or matching checkoutBrowserSessionId).
+ * `customer` is the checkout form payload (email, phone, etc.).
+ */
+async function callerMayAccessPendingStripeDraft(req, o, customer, priorCheckoutEmail, linkedDraftOrderId, clientCheckoutSessionId) {
+  if (!o || o.paymentProvider !== "stripe") return false;
+  if (o.status !== "pending_payment" && o.status !== "payment_failed") return false;
+  if (req.customerUser) {
+    return String(o.customerId) === String(req.customerUser._id);
+  }
+  const sid = String(clientCheckoutSessionId || "").trim();
+  if (sid.length >= 8 && o.checkoutBrowserSessionId && sid === String(o.checkoutBrowserSessionId).trim()) {
+    return true;
+  }
+  const lid = String(linkedDraftOrderId || "").trim();
+  if (lid && isLikelyMongoObjectId(lid) && lid === String(o._id)) {
+    const pf = normalizePhoneDigits(customer?.phone);
+    const po = normalizePhoneDigits(o.customer?.phone);
+    if (pf.length >= 10 && po.length >= 10 && pf === po) return true;
+  }
+  const pe = String(priorCheckoutEmail || customer?.email || "").trim().toLowerCase();
+  if (!pe) return false;
+  const snap = String(o.customer?.email || "").trim().toLowerCase();
+  const linked = await CustomerUser.findById(o.customerId).select("email").lean();
+  const linkedEm = linked?.email ? String(linked.email).trim().toLowerCase() : "";
+  return pe === snap || pe === linkedEm;
+}
+
+/** Find a pending Stripe draft this caller may still own (email change, linked order id, browser session id, or customerId). */
+async function findAccessibleStripeCheckoutDraftForCreate(
+  req,
+  customer,
+  priorCheckoutEmail,
+  linkedDraftOrderId,
+  /** After upsert: include to match drafts already tied to this CustomerUser. */
+  customerIdOrNull,
+  clientCheckoutSessionId
+) {
+  const newEmailNorm = String(customer?.email || "").trim().toLowerCase();
+  const priorNorm = String(priorCheckoutEmail || "").trim().toLowerCase();
+  const sessionNorm = String(clientCheckoutSessionId || "").trim();
+  const or = [];
+  if (customerIdOrNull) or.push({ customerId: customerIdOrNull });
+  if (newEmailNorm) or.push({ "customer.email": newEmailNorm });
+  if (priorNorm && priorNorm !== newEmailNorm) or.push({ "customer.email": priorNorm });
+  const lid = String(linkedDraftOrderId || "").trim();
+  if (lid && isLikelyMongoObjectId(lid)) or.push({ _id: lid });
+  if (sessionNorm.length >= 8) or.push({ checkoutBrowserSessionId: sessionNorm });
+  if (or.length === 0) return null;
+  const list = await Order.find({
+    status: { $in: ["pending_payment", "payment_failed"] },
+    paymentProvider: "stripe",
+    $or: or,
+  })
+    .sort({ createdAt: -1 })
+    .limit(20)
+    .lean();
+  for (const raw of list) {
+    const ok = await callerMayAccessPendingStripeDraft(req, raw, customer, priorCheckoutEmail, linkedDraftOrderId, clientCheckoutSessionId);
+    if (ok) return raw;
+  }
+  return null;
+}
+
+/** Guest access to a pending checkout draft (Stripe or PayPal) — same rules as PATCH/cancel. */
+async function guestMayAccessCheckoutDraft(o, body) {
+  if (!o) return false;
+  const {
+    email,
+    priorEmail,
+    clientCheckoutSessionId,
+    linkedDraftOrderId,
+    customer: bodyCustomer,
+  } = body || {};
+  const sid = String(clientCheckoutSessionId || "").trim();
+  if (sid.length >= 8 && o.checkoutBrowserSessionId && sid === String(o.checkoutBrowserSessionId).trim()) {
+    return true;
+  }
+  const lid = String(linkedDraftOrderId || "").trim();
+  if (lid && isLikelyMongoObjectId(lid) && lid === String(o._id)) {
+    const pf = normalizePhoneDigits(bodyCustomer?.phone);
+    const po = normalizePhoneDigits(o.customer?.phone);
+    if (pf.length >= 10 && po.length >= 10 && pf === po) return true;
+  }
+  const pe = String(priorEmail || email || bodyCustomer?.email || "").trim().toLowerCase();
+  if (!pe) return false;
+  const snap = String(o.customer?.email || "").trim().toLowerCase();
+  const linked = await CustomerUser.findById(o.customerId).select("email").lean();
+  const linkedEm = linked?.email ? String(linked.email).trim().toLowerCase() : "";
+  return pe === snap || pe === linkedEm;
+}
+
+async function callerMayAccessPendingPayPalDraft(req, o, customer, priorCheckoutEmail, linkedDraftOrderId, clientCheckoutSessionId) {
+  if (!o || o.paymentProvider !== "paypal") return false;
+  if (o.status !== "pending_payment") return false;
+  if (req.customerUser) {
+    return String(o.customerId) === String(req.customerUser._id);
+  }
+  const sid = String(clientCheckoutSessionId || "").trim();
+  if (sid.length >= 8 && o.checkoutBrowserSessionId && sid === String(o.checkoutBrowserSessionId).trim()) {
+    return true;
+  }
+  const lid = String(linkedDraftOrderId || "").trim();
+  if (lid && isLikelyMongoObjectId(lid) && lid === String(o._id)) {
+    const pf = normalizePhoneDigits(customer?.phone);
+    const po = normalizePhoneDigits(o.customer?.phone);
+    if (pf.length >= 10 && po.length >= 10 && pf === po) return true;
+  }
+  const pe = String(priorCheckoutEmail || customer?.email || "").trim().toLowerCase();
+  if (!pe) return false;
+  const snap = String(o.customer?.email || "").trim().toLowerCase();
+  const linked = await CustomerUser.findById(o.customerId).select("email").lean();
+  const linkedEm = linked?.email ? String(linked.email).trim().toLowerCase() : "";
+  return pe === snap || pe === linkedEm;
+}
+
+/** Find a pending PayPal draft this caller may still own (same discovery shape as Stripe). */
+async function findAccessiblePayPalCheckoutDraftForCreate(
+  req,
+  customer,
+  priorCheckoutEmail,
+  linkedDraftOrderId,
+  customerIdOrNull,
+  clientCheckoutSessionId
+) {
+  const newEmailNorm = String(customer?.email || "").trim().toLowerCase();
+  const priorNorm = String(priorCheckoutEmail || "").trim().toLowerCase();
+  const sessionNorm = String(clientCheckoutSessionId || "").trim();
+  const or = [];
+  if (customerIdOrNull) or.push({ customerId: customerIdOrNull });
+  if (newEmailNorm) or.push({ "customer.email": newEmailNorm });
+  if (priorNorm && priorNorm !== newEmailNorm) or.push({ "customer.email": priorNorm });
+  const lid = String(linkedDraftOrderId || "").trim();
+  if (lid && isLikelyMongoObjectId(lid)) or.push({ _id: lid });
+  if (sessionNorm.length >= 8) or.push({ checkoutBrowserSessionId: sessionNorm });
+  if (or.length === 0) return null;
+  const list = await Order.find({
+    status: "pending_payment",
+    paymentProvider: "paypal",
+    $or: or,
+  })
+    .sort({ createdAt: -1 })
+    .limit(20)
+    .lean();
+  for (const raw of list) {
+    const ok = await callerMayAccessPendingPayPalDraft(req, raw, customer, priorCheckoutEmail, linkedDraftOrderId, clientCheckoutSessionId);
+    if (ok) return raw;
+  }
+  return null;
+}
+
+/**
+ * After a declined / failed 3DS attempt, reuse the same order row: cancel old PI, create a new one, refresh line items from the request.
+ * Returns { clientSecret, orderId } or null if the order is not a reopenable payment_failed draft or access is denied.
+ */
+async function reopenStripePaymentFailedDraftForCreateIntent(stripe, orderLean, ctx) {
+  const { req, customer, items, shippingCents, taxCents, priorCheckoutEmail, linkedDraftOrderId, clientCheckoutSessionId } = ctx;
+  if (!stripe || !orderLean?._id) return null;
+  const oid = String(orderLean._id).trim();
+  const o = await Order.findById(oid);
+  if (!o || o.paymentProvider !== "stripe" || o.status !== "payment_failed") return null;
+
+  const leanObj = typeof o.toObject === "function" ? o.toObject() : { ...o };
+  const accessOk = await callerMayAccessPendingStripeDraft(
+    req,
+    leanObj,
+    customer,
+    priorCheckoutEmail,
+    linkedDraftOrderId,
+    clientCheckoutSessionId
+  );
+  if (!accessOk) return null;
+
+  const shipCents = Number(shippingCents) || 0;
+  const taxCentsVal = Number(taxCents) || 0;
+  const amountCents = computeCardCheckoutAmountCents(items, shipCents, taxCentsVal);
+  if (amountCents < 50) return null;
+
+  const cu = await migrateGuestCustomerEmailOnCheckoutPatch({
+    previousCustomerId: o.customerId,
+    customer,
+  });
+  if (!cu) return null;
+  const effectiveCustomerId = req.customerUser?._id || cu._id;
+  const totalCents = sumItemsCents(items);
+  const notesVal =
+    customer?.notes != null && String(customer.notes).trim() ? String(customer.notes).trim() : undefined;
+
+  const oldPi = o.paymentReferenceId ? String(o.paymentReferenceId).trim() : "";
+  if (oldPi) {
+    try {
+      await stripe.paymentIntents.cancel(oldPi);
+    } catch (e) {
+      orderWarn(`reopen payment_failed draft: could not cancel PI ${oldPi}: ${e?.message || e}`);
+    }
+  }
+  const custPi = buildOrderCustomer(customer);
+  const emailPi = custPi.email || "";
+  const namePi = [custPi.firstName, custPi.lastName].filter(Boolean).join(" ").trim();
+  const paymentIntent = await stripe.paymentIntents.create({
+    amount: amountCents,
+    currency: "usd",
+    payment_method_types: ["card"],
+    description: emailPi ? `Custom Sports Cards checkout (${emailPi})` : "Custom Sports Cards checkout",
+    metadata: {
+      orderId: oid,
+      ...(emailPi ? { customer_email: emailPi, ...(namePi ? { customer_name: namePi.slice(0, 500) } : {}) } : {}),
+    },
+    receipt_email: emailPi || undefined,
+  });
+  const sessionSet =
+    String(clientCheckoutSessionId || "").trim().length >= 8
+      ? { checkoutBrowserSessionId: String(clientCheckoutSessionId).trim() }
+      : {};
+  await Order.findByIdAndUpdate(oid, {
+    $set: {
+      status: "pending_payment",
+      paymentReferenceId: paymentIntent.id,
+      items,
+      totalCents,
+      shippingCents: shipCents,
+      taxCents: taxCentsVal,
+      customer: buildOrderCustomer(customer),
+      customerId: effectiveCustomerId,
+      notes: notesVal,
+      createAccount: Boolean(customer?.createAccount),
+      ...sessionSet,
+    },
+    $unset: { paymentLastError: "" },
+  });
+  invalidateAdminStatsCache();
+  orderInfo("reopen payment_failed draft for new PI ok", { orderId: oid, paymentIntentId: paymentIntent.id });
+  return { clientSecret: paymentIntent.client_secret, orderId: oid };
 }
 
 /** Build order customer object from request body (all address/details). */
@@ -348,9 +597,15 @@ router.post("/confirm-session", optionalCustomer, async (req, res) => {
   }
 });
 
+/** Max age (minutes) for a stale pending_payment draft before auto-cancel. Default 1440 (24h). */
+function checkoutDraftMaxAgeMs() {
+  const n = parseInt(String(process.env.CHECKOUT_DRAFT_MAX_AGE_MINUTES || "1440"), 10);
+  return (Number.isFinite(n) && n > 0 ? n : 1440) * 60 * 1000;
+}
+
 /** POST /api/orders/create-payment-intent
- * Body: { customer, items, shippingCents, taxCents }. **customer is required** (full billing) for fraud checks; no DB order until payment succeeds.
- * Creates PaymentIntent (card only), returns { clientSecret }.
+ * Body: { customer, items, shippingCents, taxCents }. Creates CustomerUser (guest), draft Order (pending_payment), PaymentIntent with metadata.orderId.
+ * Returns { clientSecret, orderId }.
  */
 router.post("/create-payment-intent", optionalCustomer, async (req, res) => {
   try {
@@ -362,7 +617,8 @@ router.post("/create-payment-intent", optionalCustomer, async (req, res) => {
       orderWarn("POST /create-payment-intent 503: STRIPE_SECRET_KEY not set");
       return res.status(503).json({ error: "Stripe not configured. Set STRIPE_SECRET_KEY." });
     }
-    const { customer, items, shippingCents, taxCents } = req.body || {};
+    const { customer, items, shippingCents, taxCents, priorCheckoutEmail, linkedDraftOrderId, clientCheckoutSessionId } =
+      req.body || {};
     if (!items?.length || !Array.isArray(items)) {
       orderWarn("POST /create-payment-intent 400: items invalid");
       return res.status(400).json({ error: "items (non-empty array) required" });
@@ -378,26 +634,148 @@ router.post("/create-payment-intent", optionalCustomer, async (req, res) => {
       orderWarn("POST /create-payment-intent 400: amount too small", { amountCents });
       return res.status(400).json({ error: "Amount too small" });
     }
+
+    const reopenCtx = {
+      req,
+      customer,
+      items,
+      shippingCents,
+      taxCents,
+      priorCheckoutEmail,
+      linkedDraftOrderId,
+      clientCheckoutSessionId,
+    };
+    const preBlock = await findAccessibleStripeCheckoutDraftForCreate(
+      req,
+      customer,
+      priorCheckoutEmail,
+      linkedDraftOrderId,
+      req.customerUser?._id || null,
+      clientCheckoutSessionId
+    );
+    if (preBlock) {
+      if (preBlock.status === "payment_failed") {
+        try {
+          const reopened = await reopenStripePaymentFailedDraftForCreateIntent(stripe, preBlock, reopenCtx);
+          if (reopened?.clientSecret) {
+            return res.json(reopened);
+          }
+        } catch (e) {
+          orderErr("create-payment-intent reopen (preBlock)", e);
+          return res.status(500).json({ error: e.message });
+        }
+      }
+      orderWarn("POST /create-payment-intent 409: existing checkout draft (pre-upsert)");
+      return res.status(409).json({
+        error:
+          "You already have an unpaid card checkout open. Use Continue saved checkout on the payment step, or cancel it to start over.",
+        existingOrderId: String(preBlock._id),
+      });
+    }
+
+    const cu = await upsertCustomerFromCheckout(customer);
+    if (!cu) {
+      return res.status(500).json({ error: "Could not create customer record" });
+    }
+    const effectiveCustomerId = req.customerUser?._id || cu._id;
+    const cutoff = new Date(Date.now() - checkoutDraftMaxAgeMs());
+    await Order.updateMany(
+      {
+        customerId: effectiveCustomerId,
+        status: "pending_payment",
+        paymentProvider: { $in: ["stripe", "paypal"] },
+        createdAt: { $lt: cutoff },
+      },
+      {
+        $set: {
+          status: "cancelled",
+          notes: "Checkout draft expired (auto-cancelled).",
+        },
+      }
+    );
+    const postBlock = await findAccessibleStripeCheckoutDraftForCreate(
+      req,
+      customer,
+      priorCheckoutEmail,
+      linkedDraftOrderId,
+      effectiveCustomerId,
+      clientCheckoutSessionId
+    );
+    if (postBlock) {
+      if (postBlock.status === "payment_failed") {
+        try {
+          const reopened = await reopenStripePaymentFailedDraftForCreateIntent(stripe, postBlock, reopenCtx);
+          if (reopened?.clientSecret) {
+            return res.json(reopened);
+          }
+        } catch (e) {
+          orderErr("create-payment-intent reopen (postBlock)", e);
+          return res.status(500).json({ error: e.message });
+        }
+      }
+      orderWarn("POST /create-payment-intent 409: existing checkout draft (post-upsert)");
+      return res.status(409).json({
+        error:
+          "You already have an unpaid card checkout open. Use Continue saved checkout on the payment step, or cancel it to start over.",
+        existingOrderId: String(postBlock._id),
+      });
+    }
+
+    const shipCents = Number(shippingCents) || 0;
+    const taxCentsVal = Number(taxCents) || 0;
+    const totalCents = sumItemsCents(items);
+    const notesVal =
+      customer?.notes != null && String(customer.notes).trim() ? String(customer.notes).trim() : undefined;
+
     orderInfo("POST /create-payment-intent", {
       itemLines: items.length,
       amountCents,
       hasCustomer: true,
     });
+
+    const sessionNorm = String(clientCheckoutSessionId || "").trim();
+    const orderDoc = await Order.create({
+      status: "pending_payment",
+      paymentProvider: "stripe",
+      customer: buildOrderCustomer(customer),
+      customerId: effectiveCustomerId,
+      items,
+      totalCents,
+      shippingCents: shipCents,
+      taxCents: taxCentsVal,
+      notes: notesVal,
+      createAccount: Boolean(customer?.createAccount),
+      ...(sessionNorm.length >= 8 ? { checkoutBrowserSessionId: sessionNorm } : {}),
+    });
+    const orderId = String(orderDoc._id);
     const custPi = buildOrderCustomer(customer);
     const emailPi = custPi.email || "";
     const namePi = [custPi.firstName, custPi.lastName].filter(Boolean).join(" ").trim();
-    const paymentIntent = await stripe.paymentIntents.create({
-      amount: amountCents,
-      currency: "usd",
-      payment_method_types: ["card"],
-      description: emailPi ? `Custom Sports Cards checkout (${emailPi})` : "Custom Sports Cards checkout",
-      metadata: {
-        ...(emailPi ? { customer_email: emailPi, ...(namePi ? { customer_name: namePi.slice(0, 500) } : {}) } : {}),
-      },
-      receipt_email: emailPi || undefined,
-    });
-    orderInfo("create-payment-intent ok", { paymentIntentId: paymentIntent.id });
-    res.json({ clientSecret: paymentIntent.client_secret });
+
+    try {
+      const paymentIntent = await stripe.paymentIntents.create({
+        amount: amountCents,
+        currency: "usd",
+        payment_method_types: ["card"],
+        description: emailPi ? `Custom Sports Cards checkout (${emailPi})` : "Custom Sports Cards checkout",
+        metadata: {
+          orderId,
+          ...(emailPi ? { customer_email: emailPi, ...(namePi ? { customer_name: namePi.slice(0, 500) } : {}) } : {}),
+        },
+        receipt_email: emailPi || undefined,
+      });
+      await Order.findByIdAndUpdate(orderId, { $set: { paymentReferenceId: paymentIntent.id } });
+      orderInfo("create-payment-intent ok", { paymentIntentId: paymentIntent.id, orderId });
+      invalidateAdminStatsCache();
+      res.json({ clientSecret: paymentIntent.client_secret, orderId });
+    } catch (e) {
+      await Order.findByIdAndUpdate(orderId, {
+        $set: { status: "payment_failed", paymentLastError: String(e?.message || e || "Stripe error").slice(0, 2000) },
+      });
+      invalidateAdminStatsCache();
+      orderErr("create-payment-intent", e);
+      res.status(500).json({ error: e.message });
+    }
   } catch (e) {
     orderErr("create-payment-intent", e);
     res.status(500).json({ error: e.message });
@@ -434,159 +812,17 @@ router.post("/confirm-payment", optionalCustomer, async (req, res) => {
         : null;
     const mergedForSave = { ...(fromStripeObj || {}), ...(customer || {}) };
 
-    const existingForPi = await Order.findOne({ paymentReferenceId: paymentIntentId });
-    if (existingForPi?.status === "confirmed") {
-      orderInfo("POST /confirm-payment idempotent", { paymentIntentId, orderId: String(existingForPi._id) });
-      return res.json(existingForPi);
+    const finalized = await finalizeStripeDraftOrderFromSucceededIntent(stripe, paymentIntent, {
+      requestCustomer: customer,
+      customerUser: req.customerUser,
+    });
+    if (finalized.ok) {
+      orderInfo("POST /confirm-payment ok (draft)", { orderId: String(finalized.order._id) });
+      return res.json(finalized.order);
     }
-
-    /** Legacy: order row was created at PaymentIntent creation (pending_payment). */
-    if (existingForPi?.status === "pending_payment") {
-      const prev = existingForPi;
-      const orderId = String(prev._id);
-      const update = { status: "confirmed", paymentProvider: "stripe", paymentReferenceId: paymentIntentId };
-      if (customer?.notes != null && String(customer.notes).trim()) {
-        update.notes = String(customer.notes).trim();
-      }
-      const rawPrevC = prev.customer;
-      const prevC =
-        rawPrevC && typeof rawPrevC === "object"
-          ? typeof rawPrevC.toObject === "function"
-            ? rawPrevC.toObject()
-            : { ...rawPrevC }
-          : {};
-      const profileMerge = { ...prevC, ...mergedForSave, email: mergedForSave.email || prevC.email || undefined };
-      if (profileMerge.email) {
-        await upsertCustomerFromCheckout(profileMerge);
-      }
-      if (req.customerUser?._id) {
-        update.customerId = req.customerUser._id;
-      } else {
-        const e = String(profileMerge.email || "").trim().toLowerCase();
-        if (e) {
-          const u = await CustomerUser.findOne({ email: e });
-          if (u) update.customerId = u._id;
-          else if (prev.customerId) update.customerId = prev.customerId;
-        } else if (prev.customerId) {
-          update.customerId = prev.customerId;
-        }
-      }
-      const order = await Order.findByIdAndUpdate(
-        orderId,
-        { $set: update, $unset: { customer: "" } },
-        { new: true }
-      );
-      if (!order) {
-        orderWarn(`POST /confirm-payment 404: order update returned null id=${orderId}`);
-        return res.status(404).json({ error: "Order not found" });
-      }
-
-      const orderForReceipt = await Order.findById(orderId).populate({
-        path: "customerId",
-        select: "email firstName lastName phone address addressLine2 city state zip country",
-      });
-      const custView = getOrderCustomerView(
-        orderForReceipt ? orderForReceipt.toObject() : { customer: prevC, customerId: null }
-      );
-      const em = custView.email?.trim();
-      if (em) {
-        try {
-          const name = [custView.firstName, custView.lastName].filter(Boolean).join(" ").trim();
-          await stripe.paymentIntents.update(paymentIntentId, {
-            receipt_email: em,
-            description: `Custom Sports Cards order ${orderId} (${em})`,
-            metadata: {
-              ...paymentIntent.metadata,
-              orderId: String(orderId),
-              customer_email: em,
-              ...(name ? { customer_name: name.slice(0, 500) } : {}),
-            },
-          });
-        } catch (err) {
-          orderWarn(`paymentIntent update (receipt): ${err?.message || err}`);
-        }
-      }
-
-      if (prev.status !== "confirmed" && order.status === "confirmed") {
-        notifyOrderPlaced(order).catch((err) => orderErr("notifyOrderPlaced (confirm-payment)", err));
-      }
-      orderInfo("POST /confirm-payment ok (legacy pending)", { orderId, fromStatus: prev.status, to: order.status });
-      invalidateAdminStatsCache();
-      return res.json(order);
-    }
-
-    const metaOrderId = paymentIntent.metadata?.orderId;
-    if (metaOrderId) {
-      const prev = await Order.findById(metaOrderId);
-      if (prev && prev.status === "pending_payment" && String(prev.paymentReferenceId || "") === String(paymentIntentId)) {
-        const orderId = String(prev._id);
-        const update = { status: "confirmed", paymentProvider: "stripe", paymentReferenceId: paymentIntentId };
-        if (customer?.notes != null && String(customer.notes).trim()) {
-          update.notes = String(customer.notes).trim();
-        }
-        const rawPrevC = prev.customer;
-        const prevC =
-          rawPrevC && typeof rawPrevC === "object"
-            ? typeof rawPrevC.toObject === "function"
-              ? rawPrevC.toObject()
-              : { ...rawPrevC }
-            : {};
-        const profileMerge = { ...prevC, ...mergedForSave, email: mergedForSave.email || prevC.email || undefined };
-        if (profileMerge.email) {
-          await upsertCustomerFromCheckout(profileMerge);
-        }
-        if (req.customerUser?._id) {
-          update.customerId = req.customerUser._id;
-        } else {
-          const e = String(profileMerge.email || "").trim().toLowerCase();
-          if (e) {
-            const u = await CustomerUser.findOne({ email: e });
-            if (u) update.customerId = u._id;
-            else if (prev.customerId) update.customerId = prev.customerId;
-          } else if (prev.customerId) {
-            update.customerId = prev.customerId;
-          }
-        }
-        const order = await Order.findByIdAndUpdate(
-          orderId,
-          { $set: update, $unset: { customer: "" } },
-          { new: true }
-        );
-        if (!order) {
-          return res.status(404).json({ error: "Order not found" });
-        }
-        const orderForReceipt = await Order.findById(orderId).populate({
-          path: "customerId",
-          select: "email firstName lastName phone address addressLine2 city state zip country",
-        });
-        const custView = getOrderCustomerView(
-          orderForReceipt ? orderForReceipt.toObject() : { customer: prevC, customerId: null }
-        );
-        const em = custView.email?.trim();
-        if (em) {
-          try {
-            const name = [custView.firstName, custView.lastName].filter(Boolean).join(" ").trim();
-            await stripe.paymentIntents.update(paymentIntentId, {
-              receipt_email: em,
-              description: `Custom Sports Cards order ${orderId} (${em})`,
-              metadata: {
-                ...paymentIntent.metadata,
-                orderId: String(orderId),
-                customer_email: em,
-                ...(name ? { customer_name: name.slice(0, 500) } : {}),
-              },
-            });
-          } catch (err) {
-            orderWarn(`paymentIntent update (receipt): ${err?.message || err}`);
-          }
-        }
-        if (prev.status !== "confirmed" && order.status === "confirmed") {
-          notifyOrderPlaced(order).catch((err) => orderErr("notifyOrderPlaced (confirm-payment)", err));
-        }
-        orderInfo("POST /confirm-payment ok (legacy metadata)", { orderId, fromStatus: prev.status, to: order.status });
-        invalidateAdminStatsCache();
-        return res.json(order);
-      }
+    if (finalized.code === "amount_mismatch") {
+      orderWarn("POST /confirm-payment 400: amount mismatch draft");
+      return res.status(400).json({ error: "Order total does not match payment" });
     }
 
     if (!items?.length || !Array.isArray(items)) {
@@ -611,6 +847,7 @@ router.post("/confirm-payment", optionalCustomer, async (req, res) => {
       return res.status(500).json({ error: "Could not create customer record" });
     }
     const shipCents = Number(shippingCents) || 0;
+    const taxCentsVal = Number(taxCents) || 0;
     const totalCents = sumItemsCents(items);
     const notesVal =
       mergedForSave.notes != null && String(mergedForSave.notes).trim()
@@ -627,6 +864,7 @@ router.post("/confirm-payment", optionalCustomer, async (req, res) => {
       items,
       totalCents,
       shippingCents: shipCents,
+      taxCents: taxCentsVal,
       notes: notesVal,
       createAccount,
     });
@@ -669,14 +907,21 @@ router.get("/paypal-client-config", (_req, res) => {
   try {
     const enabled = isPayPalConfigured();
     const clientId = enabled ? String(process.env.PAYPAL_CLIENT_ID || "").trim() : "";
-    res.json({ enabled: Boolean(enabled && clientId), clientId: enabled ? clientId : "" });
+    res.json({
+      enabled: Boolean(enabled && clientId),
+      clientId: enabled ? clientId : "",
+      environment: getPayPalApiEnvironment(),
+    });
   } catch (e) {
     orderErr("paypal-client-config", e);
     res.status(500).json({ error: e.message });
   }
 });
 
-/** POST /api/orders/create-paypal-order — same body as create-payment-intent; no DB order until capture. Returns { placementRef, paypalOrderId }. */
+/**
+ * POST /api/orders/create-paypal-order — same body as create-payment-intent (+ priorCheckoutEmail, linkedDraftOrderId, clientCheckoutSessionId).
+ * Creates a draft Order (pending_payment, PayPal) and a PayPal order; returns { placementRef, paypalOrderId, orderId }.
+ */
 router.post("/create-paypal-order", optionalCustomer, async (req, res) => {
   try {
     if (!dbConnected()) {
@@ -687,7 +932,8 @@ router.post("/create-paypal-order", optionalCustomer, async (req, res) => {
       orderWarn("POST /create-paypal-order 503: PayPal not configured");
       return res.status(503).json({ error: "PayPal not configured. Set PAYPAL_CLIENT_ID and PAYPAL_CLIENT_SECRET." });
     }
-    const { customer, items, shippingCents, taxCents } = req.body || {};
+    const { customer, items, shippingCents, taxCents, priorCheckoutEmail, linkedDraftOrderId, clientCheckoutSessionId } =
+      req.body || {};
     if (!items?.length || !Array.isArray(items)) {
       orderWarn("POST /create-paypal-order 400: items invalid");
       return res.status(400).json({ error: "items (non-empty array) required" });
@@ -703,11 +949,98 @@ router.post("/create-paypal-order", optionalCustomer, async (req, res) => {
       orderWarn("POST /create-paypal-order 400: amount too small", { amountCents });
       return res.status(400).json({ error: "Amount too small" });
     }
+    const preBlock = await findAccessiblePayPalCheckoutDraftForCreate(
+      req,
+      customer,
+      priorCheckoutEmail,
+      linkedDraftOrderId,
+      req.customerUser?._id || null,
+      clientCheckoutSessionId
+    );
+    if (preBlock) {
+      orderWarn("POST /create-paypal-order 409: existing PayPal draft (pre-upsert)");
+      return res.status(409).json({
+        error:
+          "You already have an unpaid PayPal checkout open. Use Continue saved checkout on the payment step, or cancel it to start over.",
+        existingOrderId: String(preBlock._id),
+        placementRef: preBlock.paypalPlacementRef || undefined,
+        paypalOrderId: preBlock.paymentReferenceId || undefined,
+      });
+    }
+
+    const cu = await upsertCustomerFromCheckout(customer);
+    if (!cu) {
+      return res.status(500).json({ error: "Could not create customer record" });
+    }
+    const effectiveCustomerId = req.customerUser?._id || cu._id;
+    const cutoff = new Date(Date.now() - checkoutDraftMaxAgeMs());
+    await Order.updateMany(
+      {
+        customerId: effectiveCustomerId,
+        status: "pending_payment",
+        paymentProvider: { $in: ["stripe", "paypal"] },
+        createdAt: { $lt: cutoff },
+      },
+      {
+        $set: {
+          status: "cancelled",
+          notes: "Checkout draft expired (auto-cancelled).",
+        },
+      }
+    );
+    const postBlock = await findAccessiblePayPalCheckoutDraftForCreate(
+      req,
+      customer,
+      priorCheckoutEmail,
+      linkedDraftOrderId,
+      effectiveCustomerId,
+      clientCheckoutSessionId
+    );
+    if (postBlock) {
+      orderWarn("POST /create-paypal-order 409: existing PayPal draft (post-upsert)");
+      return res.status(409).json({
+        error:
+          "You already have an unpaid PayPal checkout open. Use Continue saved checkout on the payment step, or cancel it to start over.",
+        existingOrderId: String(postBlock._id),
+        placementRef: postBlock.paypalPlacementRef || undefined,
+        paypalOrderId: postBlock.paymentReferenceId || undefined,
+      });
+    }
+
     const valueUsd = (amountCents / 100).toFixed(2);
     const placementRef = randomUUID();
     const pp = await paypalCreateOrder({ valueUsd, customId: placementRef });
-    orderInfo("create-paypal-order ok", { placementRef, paypalOrderId: pp.id });
-    res.json({ placementRef, paypalOrderId: pp.id });
+    const shipCents = Number(shippingCents) || 0;
+    const taxCentsVal = Number(taxCents) || 0;
+    const totalCents = sumItemsCents(items);
+    const notesVal =
+      customer?.notes != null && String(customer.notes).trim() ? String(customer.notes).trim() : undefined;
+    const sessionNorm = String(clientCheckoutSessionId || "").trim();
+    let orderDoc;
+    try {
+      orderDoc = await Order.create({
+        status: "pending_payment",
+        paymentProvider: "paypal",
+        paymentReferenceId: pp.id,
+        paypalPlacementRef: placementRef,
+        customer: buildOrderCustomer(customer),
+        customerId: effectiveCustomerId,
+        items,
+        totalCents,
+        shippingCents: shipCents,
+        taxCents: taxCentsVal,
+        notes: notesVal,
+        createAccount: Boolean(customer?.createAccount),
+        ...(sessionNorm.length >= 8 ? { checkoutBrowserSessionId: sessionNorm } : {}),
+      });
+    } catch (e) {
+      await paypalCancelOrder(pp.id).catch(() => {});
+      throw e;
+    }
+    const orderId = String(orderDoc._id);
+    invalidateAdminStatsCache();
+    orderInfo("create-paypal-order ok", { placementRef, paypalOrderId: pp.id, orderId });
+    res.json({ placementRef, paypalOrderId: pp.id, orderId });
   } catch (e) {
     orderErr("create-paypal-order", e);
     res.status(500).json({ error: e.message });
@@ -725,7 +1058,8 @@ router.post("/capture-paypal-order", optionalCustomer, async (req, res) => {
       orderWarn("POST /capture-paypal-order 503: PayPal not configured");
       return res.status(503).json({ error: "PayPal not configured" });
     }
-    const { placementRef, orderId, paypalOrderId, customer, items, shippingCents, taxCents } = req.body || {};
+    const { placementRef, orderId, paypalOrderId, customer, items, shippingCents, taxCents, priorEmail, email, clientCheckoutSessionId, linkedDraftOrderId } =
+      req.body || {};
     if (!paypalOrderId) {
       orderWarn("POST /capture-paypal-order 400: paypalOrderId missing");
       return res.status(400).json({ error: "paypalOrderId required" });
@@ -733,7 +1067,7 @@ router.post("/capture-paypal-order", optionalCustomer, async (req, res) => {
     const ppId = String(paypalOrderId).trim();
 
     if (placementRef) {
-      orderInfo("POST /capture-paypal-order (deferred)", { placementRef, paypalOrderId: ppId });
+      orderInfo("POST /capture-paypal-order (deferred)", { placementRef, paypalOrderId: ppId, orderId });
       if (!items?.length || !Array.isArray(items)) {
         return res.status(400).json({ error: "items (non-empty array) required" });
       }
@@ -747,6 +1081,41 @@ router.post("/capture-paypal-order", optionalCustomer, async (req, res) => {
         return res.status(400).json({ error: "Amount too small" });
       }
       const expectedUsd = (expectedCents / 100).toFixed(2);
+      const draftOid = String(orderId || "").trim();
+      let pending = null;
+      if (draftOid && isLikelyMongoObjectId(draftOid)) {
+        pending = await Order.findById(draftOid);
+        if (!pending || pending.paymentProvider !== "paypal" || pending.status !== "pending_payment") {
+          orderWarn(`POST /capture-paypal-order 400: invalid PayPal draft orderId=${draftOid}`);
+          return res.status(400).json({ error: "Invalid or expired checkout" });
+        }
+        if (String(pending.paymentReferenceId || "").trim() !== ppId) {
+          return res.status(400).json({ error: "PayPal order does not match this checkout" });
+        }
+        if (String(pending.paypalPlacementRef || "").trim() !== String(placementRef).trim()) {
+          return res.status(400).json({ error: "Payment does not match this checkout" });
+        }
+        if (req.customerUser) {
+          if (String(pending.customerId) !== String(req.customerUser._id)) {
+            return res.status(403).json({ error: "Forbidden" });
+          }
+        } else {
+          const okGuest = await guestMayAccessCheckoutDraft(pending, {
+            email,
+            priorEmail,
+            clientCheckoutSessionId,
+            linkedDraftOrderId,
+            customer,
+          });
+          if (!okGuest) return res.status(403).json({ error: "Forbidden" });
+        }
+        const draftCents = computeCardCheckoutAmountCents(pending.items, pending.shippingCents, pending.taxCents);
+        if (draftCents !== expectedCents) {
+          orderWarn("POST /capture-paypal-order 400: cart total changed vs draft");
+          return res.status(400).json({ error: "Order total changed; refresh checkout and try again." });
+        }
+      }
+
       const captured = await paypalCaptureOrder(ppId);
       const parsed = paypalParseCapture(captured);
       if (String(parsed.referenceId || "") !== String(placementRef).trim()) {
@@ -772,22 +1141,54 @@ router.post("/capture-paypal-order", optionalCustomer, async (req, res) => {
         return res.status(500).json({ error: "Could not create customer record" });
       }
       const shipCents = Number(shippingCents) || 0;
+      const taxCentsVal = Number(taxCents) || 0;
       const totalCents = sumItemsCents(items);
       const notesVal =
         customer?.notes != null && String(customer.notes).trim() ? String(customer.notes).trim() : undefined;
+
+      if (pending) {
+        const order = await Order.findByIdAndUpdate(
+          draftOid,
+          {
+            $set: {
+              status: "confirmed",
+              paymentProvider: "paypal",
+              paymentReferenceId: captureKey,
+              customerId: req.customerUser?._id || cu._id,
+              customer: buildOrderCustomer(customer),
+              items,
+              totalCents,
+              shippingCents: shipCents,
+              taxCents: taxCentsVal,
+              notes: notesVal,
+              createAccount: Boolean(customer?.createAccount),
+            },
+            $unset: { paypalPlacementRef: "", paymentLastError: "" },
+          },
+          { new: true }
+        );
+        if (!order) return res.status(404).json({ error: "Order not found" });
+        notifyOrderPlaced(order).catch((err) => orderErr("notifyOrderPlaced (capture-paypal-order deferred)", err));
+        orderInfo("POST /capture-paypal-order ok (deferred confirm)", { orderId: String(order._id), captureId: parsed.captureId });
+        invalidateAdminStatsCache();
+        return res.json(order);
+      }
+
       const order = await Order.create({
         status: "confirmed",
         paymentProvider: "paypal",
         paymentReferenceId: captureKey,
         customerId: req.customerUser?._id || cu._id,
+        customer: buildOrderCustomer(customer),
         items,
         totalCents,
         shippingCents: shipCents,
+        taxCents: taxCentsVal,
         notes: notesVal,
         createAccount: Boolean(customer?.createAccount),
       });
       notifyOrderPlaced(order).catch((err) => orderErr("notifyOrderPlaced (capture-paypal-order deferred)", err));
-      orderInfo("POST /capture-paypal-order ok (deferred)", { orderId: String(order._id), captureId: parsed.captureId });
+      orderInfo("POST /capture-paypal-order ok (deferred legacy create)", { orderId: String(order._id), captureId: parsed.captureId });
       invalidateAdminStatsCache();
       return res.json(order);
     }
@@ -854,6 +1255,397 @@ router.post("/capture-paypal-order", optionalCustomer, async (req, res) => {
     res.json(order);
   } catch (e) {
     orderErr("capture-paypal-order", e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+/** POST /api/orders/stripe-payment-intent-failed — mark draft order payment_failed (client decline). */
+router.post("/stripe-payment-intent-failed", optionalCustomer, async (req, res) => {
+  try {
+    if (!dbConnected()) {
+      orderWarn("POST /stripe-payment-intent-failed 503");
+      return res.status(503).json({ error: "Database not configured" });
+    }
+    const { orderId, paymentIntentId, message, email, priorEmail, clientCheckoutSessionId, linkedDraftOrderId } =
+      req.body || {};
+    const msg = message != null && String(message).trim() ? String(message).trim() : "Payment failed";
+
+    if (orderId) {
+      const oid = String(orderId).trim();
+      const o = await Order.findById(oid);
+      if (!o || o.status !== "pending_payment" || o.paymentProvider !== "stripe") {
+        return res.status(404).json({ error: "No matching checkout draft" });
+      }
+      if (req.customerUser) {
+        if (String(o.customerId) !== String(req.customerUser._id)) {
+          return res.status(403).json({ error: "Forbidden" });
+        }
+      } else {
+        const okGuest = await guestMayAccessCheckoutDraft(o, {
+          email,
+          priorEmail,
+          clientCheckoutSessionId,
+          linkedDraftOrderId,
+          customer: req.body.customer,
+        });
+        if (!okGuest) {
+          return res.status(403).json({ error: "Forbidden" });
+        }
+      }
+      const updated = await markStripeDraftPaymentFailedByOrderId(oid, paymentIntentId, msg);
+      if (!updated) return res.status(404).json({ error: "No matching checkout draft" });
+      return res.json(updated);
+    }
+
+    if (paymentIntentId) {
+      const updated = await markStripeDraftPaymentFailed(String(paymentIntentId).trim(), msg);
+      if (!updated) return res.status(404).json({ error: "No matching checkout draft" });
+      return res.json(updated);
+    }
+
+    return res.status(400).json({ error: "orderId or paymentIntentId required" });
+  } catch (e) {
+    orderErr("stripe-payment-intent-failed", e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+/** POST /api/orders/cancel-checkout-draft — pending_payment → cancelled. */
+router.post("/cancel-checkout-draft", optionalCustomer, async (req, res) => {
+  try {
+    if (!dbConnected()) {
+      return res.status(503).json({ error: "Database not configured" });
+    }
+    const { orderId, email, priorEmail, clientCheckoutSessionId, linkedDraftOrderId, customer } = req.body || {};
+    const oid = String(orderId || "").trim();
+    if (!oid) return res.status(400).json({ error: "orderId required" });
+    const o = await Order.findById(oid);
+    const stripeDraft =
+      o && o.paymentProvider === "stripe" && ["pending_payment", "payment_failed"].includes(o.status);
+    const paypalDraft = o && o.paymentProvider === "paypal" && o.status === "pending_payment";
+    if (!o || (!stripeDraft && !paypalDraft)) {
+      return res.status(404).json({ error: "No matching checkout draft" });
+    }
+    if (req.customerUser) {
+      if (String(o.customerId) !== String(req.customerUser._id)) {
+        return res.status(403).json({ error: "Forbidden" });
+      }
+    } else {
+      const okGuest = await guestMayAccessCheckoutDraft(o, {
+        email,
+        priorEmail,
+        clientCheckoutSessionId,
+        linkedDraftOrderId,
+        customer,
+      });
+      if (!okGuest) return res.status(403).json({ error: "Forbidden" });
+    }
+    if (paypalDraft && o.paymentReferenceId) {
+      const cr = await paypalCancelOrder(String(o.paymentReferenceId).trim());
+      if (!cr.ok) orderWarn(`POST /cancel-checkout-draft: PayPal cancel: ${cr.message || "unknown"}`);
+    }
+    const order = await Order.findByIdAndUpdate(
+      oid,
+      {
+        $set: {
+          status: "cancelled",
+          notes: o.notes ? `${o.notes}\nCheckout abandoned.` : "Checkout abandoned.",
+        },
+      },
+      { new: true }
+    );
+    if (!order) return res.status(404).json({ error: "Order not found" });
+    invalidateAdminStatsCache();
+    orderInfo("POST /cancel-checkout-draft ok", { orderId: oid, provider: o.paymentProvider });
+    res.json(order);
+  } catch (e) {
+    orderErr("cancel-checkout-draft", e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+/**
+ * PATCH /api/orders/checkout-draft — update pending_payment or payment_failed Stripe draft + CustomerUser; recreate PI when amount changes or after a failed attempt.
+ * Guest auth: priorEmail (or email) must match the email on file for this draft (order snapshot or linked account).
+ */
+router.patch("/checkout-draft", optionalCustomer, async (req, res) => {
+  try {
+    if (!dbConnected() || !stripe) {
+      return res.status(503).json({ error: "Server not configured" });
+    }
+    const { orderId, email, priorEmail, customer, items, shippingCents, taxCents, clientCheckoutSessionId, linkedDraftOrderId } =
+      req.body || {};
+    const oid = String(orderId || "").trim();
+    if (!oid) return res.status(400).json({ error: "orderId required" });
+    if (!items?.length || !Array.isArray(items)) {
+      return res.status(400).json({ error: "items (non-empty array) required" });
+    }
+    if (!isFullCustomerPayload(customer)) {
+      return res.status(400).json({ error: "Full billing is required." });
+    }
+    const o = await Order.findById(oid);
+    if (!o || o.paymentProvider !== "stripe" || !["pending_payment", "payment_failed"].includes(o.status)) {
+      return res.status(404).json({ error: "No matching checkout draft" });
+    }
+
+    if (req.customerUser) {
+      if (String(o.customerId) !== String(req.customerUser._id)) {
+        return res.status(403).json({ error: "Forbidden" });
+      }
+    } else {
+      const okGuest = await guestMayAccessCheckoutDraft(o, {
+        email,
+        priorEmail,
+        clientCheckoutSessionId,
+        linkedDraftOrderId,
+        customer,
+      });
+      if (!okGuest) return res.status(403).json({ error: "Forbidden" });
+    }
+
+    const shipCents = Number(shippingCents) || 0;
+    const taxCentsVal = Number(taxCents) || 0;
+    const amountCents = computeCardCheckoutAmountCents(items, shipCents, taxCentsVal);
+    if (amountCents < 50) {
+      return res.status(400).json({ error: "Amount too small" });
+    }
+
+    const cu = await migrateGuestCustomerEmailOnCheckoutPatch({
+      previousCustomerId: o.customerId,
+      customer,
+    });
+    if (!cu) {
+      return res.status(500).json({ error: "Could not update customer record" });
+    }
+    const effectiveCustomerId = req.customerUser?._id || cu._id;
+    const totalCents = sumItemsCents(items);
+    const notesVal =
+      customer?.notes != null && String(customer.notes).trim() ? String(customer.notes).trim() : undefined;
+
+    const oldPi = o.paymentReferenceId ? String(o.paymentReferenceId).trim() : "";
+    let clientSecret = null;
+    let paymentReferenceId = oldPi;
+    const needFreshPiAfterFailure = o.status === "payment_failed";
+
+    if (oldPi) {
+      let shouldReplacePi = needFreshPiAfterFailure;
+      if (!shouldReplacePi) {
+        try {
+          const pi = await stripe.paymentIntents.retrieve(oldPi);
+          shouldReplacePi = pi.amount !== amountCents;
+        } catch (e) {
+          orderWarn(`PATCH checkout-draft PI retrieve ${oldPi}: ${e?.message || e}`);
+          shouldReplacePi = true;
+        }
+      }
+      if (shouldReplacePi) {
+        try {
+          await stripe.paymentIntents.cancel(oldPi);
+        } catch (e) {
+          orderWarn(`PATCH checkout-draft cancel PI ${oldPi}: ${e?.message || e}`);
+        }
+        const custPi = buildOrderCustomer(customer);
+        const emailPi = custPi.email || "";
+        const namePi = [custPi.firstName, custPi.lastName].filter(Boolean).join(" ").trim();
+        const paymentIntent = await stripe.paymentIntents.create({
+          amount: amountCents,
+          currency: "usd",
+          payment_method_types: ["card"],
+          description: emailPi ? `Custom Sports Cards checkout (${emailPi})` : "Custom Sports Cards checkout",
+          metadata: {
+            orderId: oid,
+            ...(emailPi ? { customer_email: emailPi, ...(namePi ? { customer_name: namePi.slice(0, 500) } : {}) } : {}),
+          },
+          receipt_email: emailPi || undefined,
+        });
+        paymentReferenceId = paymentIntent.id;
+        clientSecret = paymentIntent.client_secret;
+      }
+    }
+
+    if (!paymentReferenceId) {
+      const custPi = buildOrderCustomer(customer);
+      const emailPi = custPi.email || "";
+      const namePi = [custPi.firstName, custPi.lastName].filter(Boolean).join(" ").trim();
+      const paymentIntent = await stripe.paymentIntents.create({
+        amount: amountCents,
+        currency: "usd",
+        payment_method_types: ["card"],
+        description: emailPi ? `Custom Sports Cards checkout (${emailPi})` : "Custom Sports Cards checkout",
+        metadata: {
+          orderId: oid,
+          ...(emailPi ? { customer_email: emailPi, ...(namePi ? { customer_name: namePi.slice(0, 500) } : {}) } : {}),
+        },
+        receipt_email: emailPi || undefined,
+      });
+      paymentReferenceId = paymentIntent.id;
+      clientSecret = paymentIntent.client_secret;
+    }
+
+    const patchSessionNorm = String(clientCheckoutSessionId || "").trim();
+    await Order.findByIdAndUpdate(oid, {
+      $set: {
+        status: "pending_payment",
+        paymentReferenceId,
+        items,
+        totalCents,
+        shippingCents: shipCents,
+        taxCents: taxCentsVal,
+        customer: buildOrderCustomer(customer),
+        customerId: effectiveCustomerId,
+        notes: notesVal,
+        createAccount: Boolean(customer?.createAccount),
+        ...(patchSessionNorm.length >= 8 ? { checkoutBrowserSessionId: patchSessionNorm } : {}),
+      },
+      $unset: { paymentLastError: "" },
+    });
+    invalidateAdminStatsCache();
+    orderInfo("PATCH /checkout-draft ok", { orderId: oid, newPi: Boolean(clientSecret) });
+    res.json({ ok: true, orderId: oid, ...(clientSecret ? { clientSecret } : {}) });
+  } catch (e) {
+    orderErr("checkout-draft PATCH", e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+/** POST /api/orders/resume-payment-intent — new PaymentIntent for an existing pending_payment or payment_failed Stripe draft (same order row). */
+router.post("/resume-payment-intent", optionalCustomer, async (req, res) => {
+  try {
+    if (!dbConnected() || !stripe) {
+      orderWarn("POST /resume-payment-intent 503");
+      return res.status(503).json({ error: "Server not configured" });
+    }
+    const { orderId, email, priorEmail, clientCheckoutSessionId, linkedDraftOrderId, customer } = req.body || {};
+    const oid = String(orderId || "").trim();
+    if (!oid) return res.status(400).json({ error: "orderId required" });
+    const o = await Order.findById(oid);
+    if (!o || o.paymentProvider !== "stripe" || !["pending_payment", "payment_failed"].includes(o.status)) {
+      return res.status(404).json({ error: "No matching checkout draft" });
+    }
+    if (req.customerUser) {
+      if (String(o.customerId) !== String(req.customerUser._id)) {
+        return res.status(403).json({ error: "Forbidden" });
+      }
+    } else {
+      const okGuest = await guestMayAccessCheckoutDraft(o, {
+        email,
+        priorEmail,
+        clientCheckoutSessionId,
+        linkedDraftOrderId,
+        customer,
+      });
+      if (!okGuest) return res.status(403).json({ error: "Forbidden" });
+    }
+    const amountCents = computeCardCheckoutAmountCents(o.items, o.shippingCents, o.taxCents);
+    if (amountCents < 50) {
+      return res.status(400).json({ error: "Amount too small" });
+    }
+    const oldPi = o.paymentReferenceId ? String(o.paymentReferenceId).trim() : "";
+    if (oldPi) {
+      try {
+        await stripe.paymentIntents.cancel(oldPi);
+      } catch (e) {
+        orderWarn(`resume-payment-intent: could not cancel old PI ${oldPi}: ${e?.message || e}`);
+      }
+    }
+    const rawC = o.customer;
+    const cust =
+      rawC && typeof rawC === "object"
+        ? typeof rawC.toObject === "function"
+          ? rawC.toObject()
+          : { ...rawC }
+        : {};
+    const emailPi = String(cust.email || "").trim();
+    const namePi = [cust.firstName, cust.lastName].filter(Boolean).join(" ").trim();
+    const paymentIntent = await stripe.paymentIntents.create({
+      amount: amountCents,
+      currency: "usd",
+      payment_method_types: ["card"],
+      description: emailPi ? `Custom Sports Cards checkout (${emailPi})` : "Custom Sports Cards checkout",
+      metadata: {
+        orderId: oid,
+        ...(emailPi ? { customer_email: emailPi, ...(namePi ? { customer_name: namePi.slice(0, 500) } : {}) } : {}),
+      },
+      receipt_email: emailPi || undefined,
+    });
+    const resumeSessionNorm = String(clientCheckoutSessionId || "").trim();
+    await Order.findByIdAndUpdate(oid, {
+      $set: {
+        status: "pending_payment",
+        paymentReferenceId: paymentIntent.id,
+        ...(resumeSessionNorm.length >= 8 ? { checkoutBrowserSessionId: resumeSessionNorm } : {}),
+      },
+      $unset: { paymentLastError: "" },
+    });
+    orderInfo("resume-payment-intent ok", { orderId: oid, paymentIntentId: paymentIntent.id });
+    invalidateAdminStatsCache();
+    res.json({ clientSecret: paymentIntent.client_secret, orderId: oid });
+  } catch (e) {
+    orderErr("resume-payment-intent", e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+function draftJsonFromOrder(draft) {
+  const base = {
+    id: String(draft._id),
+    orderCode: draft.orderCode,
+    status: draft.status,
+    paymentProvider: draft.paymentProvider || "stripe",
+    paymentReferenceId: draft.paymentReferenceId,
+    createdAt: draft.createdAt,
+  };
+  if (draft.paymentProvider === "paypal") {
+    return {
+      ...base,
+      placementRef: draft.paypalPlacementRef || undefined,
+      paypalOrderId: draft.paymentReferenceId || undefined,
+    };
+  }
+  return base;
+}
+
+/** GET /api/orders/checkout-draft — pending card or PayPal draft for customer, or ?browserSessionId= for tab-scoped guest lookup. */
+router.get("/checkout-draft", optionalCustomer, async (req, res) => {
+  try {
+    if (!dbConnected()) {
+      return res.status(503).json({ error: "Database not configured" });
+    }
+    const browserSid = String(req.query.browserSessionId || "").trim();
+    // Logged-in customers are keyed by customerId only — avoid a stale tab session id matching someone else's draft.
+    if (!req.customerUser?._id && browserSid.length >= 8) {
+      const bySession = await Order.findOne({
+        checkoutBrowserSessionId: browserSid,
+        status: { $in: ["pending_payment", "payment_failed"] },
+        paymentProvider: { $in: ["stripe", "paypal"] },
+      })
+        .sort({ createdAt: -1 })
+        .lean();
+      if (bySession) {
+        return res.json({ draft: draftJsonFromOrder(bySession) });
+      }
+    }
+    let customerId = null;
+    if (req.customerUser?._id) {
+      customerId = req.customerUser._id;
+    } else {
+      const em = String(req.query.email || "").trim().toLowerCase();
+      if (!em) return res.json({ draft: null });
+      const u = await CustomerUser.findOne({ email: em }).select("_id").lean();
+      if (!u) return res.json({ draft: null });
+      customerId = u._id;
+    }
+    const draft = await Order.findOne({
+      customerId,
+      status: { $in: ["pending_payment", "payment_failed"] },
+      paymentProvider: { $in: ["stripe", "paypal"] },
+    })
+      .sort({ createdAt: -1 })
+      .lean();
+    if (!draft) return res.json({ draft: null });
+    res.json({ draft: draftJsonFromOrder(draft) });
+  } catch (e) {
+    orderErr("checkout-draft", e);
     res.status(500).json({ error: e.message });
   }
 });
