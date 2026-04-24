@@ -10,7 +10,8 @@
     "migrate:categories": "node scripts/migrate-categories-to-url-ids.js",
     "smtp:test": "node scripts/smtp-test.js",
     "email:scenarios": "node scripts/email-scenarios-test.js",
-    "email:test-admin-last-order": "node scripts/send-test-admin-last-order-email.js"
+    "email:test-admin-last-order": "node scripts/send-test-admin-last-order-email.js",
+    "admin:add": "node scripts/add-admin.js"
   },
   "dependencies": {
     "archiver": "^7.0.1",

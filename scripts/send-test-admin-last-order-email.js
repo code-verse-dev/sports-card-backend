@@ -86,7 +86,7 @@ async function main() {
   try {
     console.log(`[test-email] Building headless admin PDF (max ${PDF_BUILD_MS / 1000}s)…`);
     adminPdf = await withTimeout(
-      buildFullOrderCardPdfBufferHeadless(id, { purpose: "email-admin" }),
+      buildFullOrderCardPdfBufferHeadless(id, { purpose: "admin-download" }),
       PDF_BUILD_MS,
       "Headless PDF"
     );
