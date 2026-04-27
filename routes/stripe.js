@@ -25,6 +25,13 @@ import {
   markStripeDraftPaymentFailed,
   markStripeDraftPaymentFailedByOrderId,
 } from "../services/stripeOrderFinalize.js";
+import {
+  sumItemsMerchandiseCents as sumItemsCents,
+  computeAutoDiscountCents,
+  cardChargeAmountCents,
+  hostedCheckoutAmountCents,
+  allocateDiscountAcrossItems,
+} from "../services/cartDiscounts.js";
 
 const router = Router();
 const stripe = process.env.STRIPE_SECRET_KEY ? new Stripe(process.env.STRIPE_SECRET_KEY, { apiVersion: "2024-11-20.acacia" }) : null;
@@ -41,24 +48,13 @@ function orderErr(op, e) {
   console.error(`${P} ${op} failed:`, e?.message || e);
 }
 
-/** Card / PayPal prepayment: subtotal from cart lines (matches create-payment-intent). */
-function sumItemsCents(items) {
-  if (!Array.isArray(items)) return 0;
-  return items.reduce((sum, i) => sum + (Number(i?.priceCents) || 0), 0);
-}
-
 function computeCardCheckoutAmountCents(items, shippingCents, taxCents) {
-  const totalCents = sumItemsCents(items);
-  const shipCents = Number(shippingCents) || 0;
-  const taxCentsVal = Number(taxCents) || 0;
-  return totalCents + shipCents + taxCentsVal;
+  return cardChargeAmountCents(items, shippingCents, taxCents);
 }
 
-/** Stripe Checkout hosted session total (matches create-checkout-session line_items: one Stripe line per cart row, qty 1). */
+/** Stripe Checkout hosted session total (matches discounted line_items + shipping). */
 function computeHostedCheckoutSessionAmountCents(items, shippingCents) {
-  if (!Array.isArray(items)) return 0;
-  const subtotal = items.reduce((sum, i) => sum + (Number(i?.priceCents) || 0), 0);
-  return subtotal + (Number(shippingCents) || 0);
+  return hostedCheckoutAmountCents(items, shippingCents);
 }
 
 function isLikelyMongoObjectId(s) {
@@ -254,6 +250,7 @@ async function reopenStripePaymentFailedDraftForCreateIntent(stripe, orderLean, 
   if (!cu) return null;
   const effectiveCustomerId = req.customerUser?._id || cu._id;
   const totalCents = sumItemsCents(items);
+  const discountCents = computeAutoDiscountCents(items);
   const notesVal =
     customer?.notes != null && String(customer.notes).trim() ? String(customer.notes).trim() : undefined;
 
@@ -289,6 +286,7 @@ async function reopenStripePaymentFailedDraftForCreateIntent(stripe, orderLean, 
       paymentReferenceId: paymentIntent.id,
       items,
       totalCents,
+      discountCents,
       shippingCents: shipCents,
       taxCents: taxCentsVal,
       customer: buildOrderCustomer(customer),
@@ -384,19 +382,23 @@ router.post("/create-checkout-session", optionalCustomer, async (req, res) => {
       orderWarn("POST /create-checkout-session 400: items invalid");
       return res.status(400).json({ error: "items (non-empty array) required" });
     }
-    const subtotalChargedCents = items.reduce((sum, i) => sum + (Number(i.priceCents) || 0), 0);
+    const discountCents = computeAutoDiscountCents(items);
+    const subtotalMerchCents = sumItemsCents(items);
+    const subtotalChargedCents = subtotalMerchCents - discountCents;
     const shipCents = Number(shippingCents) || 0;
     const placementRef = randomUUID();
     orderInfo("POST /create-checkout-session", {
       itemLines: items.length,
       subtotalCents: subtotalChargedCents,
+      discountCents,
       shippingCents: shipCents,
       customerLoggedIn: Boolean(req.customerUser),
       placementRef,
     });
 
-    // Each cart item is one Stripe line: priceCents = total for that line, quantity = 1
-    const lineItems = items.map((i) => ({
+    const itemsForStripe = allocateDiscountAcrossItems(items, discountCents);
+    // Each cart item is one Stripe line: priceCents = total for that line after auto-discount split, quantity = 1
+    const lineItems = itemsForStripe.map((i) => ({
       price_data: {
         currency: "usd",
         product_data: {
@@ -464,6 +466,7 @@ router.post("/place-without-payment", optionalCustomer, async (req, res) => {
       return res.status(400).json({ error: "items (non-empty array) required" });
     }
     const totalCents = items.reduce((sum, i) => sum + (i.priceCents || 0), 0);
+    const discountCents = computeAutoDiscountCents(items);
     const shipCents = Number(shippingCents) || 0;
     const cu = await upsertCustomerFromCheckout(customer);
     if (!cu) {
@@ -475,6 +478,7 @@ router.post("/place-without-payment", optionalCustomer, async (req, res) => {
       customerId: cu._id,
       items,
       totalCents,
+      discountCents,
       shippingCents: shipCents,
       notes: customer.notes ? String(customer.notes).trim() : undefined,
       createAccount: Boolean(customer.createAccount),
@@ -573,6 +577,7 @@ router.post("/confirm-session", optionalCustomer, async (req, res) => {
       return res.status(500).json({ error: "Could not create customer record" });
     }
     const itemsTotal = items.reduce((sum, i) => sum + (Number(i.priceCents) || 0), 0);
+    const discountCents = computeAutoDiscountCents(items);
     const notesVal =
       customer?.notes != null && String(customer.notes).trim() ? String(customer.notes).trim() : undefined;
     const order = await Order.create({
@@ -583,6 +588,7 @@ router.post("/confirm-session", optionalCustomer, async (req, res) => {
       customerId: req.customerUser?._id || cu._id,
       items,
       totalCents: itemsTotal,
+      discountCents,
       shippingCents: shipCents,
       notes: notesVal,
       createAccount: Boolean(customer?.createAccount),
@@ -724,6 +730,7 @@ router.post("/create-payment-intent", optionalCustomer, async (req, res) => {
     const shipCents = Number(shippingCents) || 0;
     const taxCentsVal = Number(taxCents) || 0;
     const totalCents = sumItemsCents(items);
+    const discountCents = computeAutoDiscountCents(items);
     const notesVal =
       customer?.notes != null && String(customer.notes).trim() ? String(customer.notes).trim() : undefined;
 
@@ -741,6 +748,7 @@ router.post("/create-payment-intent", optionalCustomer, async (req, res) => {
       customerId: effectiveCustomerId,
       items,
       totalCents,
+      discountCents,
       shippingCents: shipCents,
       taxCents: taxCentsVal,
       notes: notesVal,
@@ -849,6 +857,7 @@ router.post("/confirm-payment", optionalCustomer, async (req, res) => {
     const shipCents = Number(shippingCents) || 0;
     const taxCentsVal = Number(taxCents) || 0;
     const totalCents = sumItemsCents(items);
+    const discountCents = computeAutoDiscountCents(items);
     const notesVal =
       mergedForSave.notes != null && String(mergedForSave.notes).trim()
         ? String(mergedForSave.notes).trim()
@@ -863,6 +872,7 @@ router.post("/confirm-payment", optionalCustomer, async (req, res) => {
       customerId: req.customerUser?._id || cu._id,
       items,
       totalCents,
+      discountCents,
       shippingCents: shipCents,
       taxCents: taxCentsVal,
       notes: notesVal,
@@ -1013,6 +1023,7 @@ router.post("/create-paypal-order", optionalCustomer, async (req, res) => {
     const shipCents = Number(shippingCents) || 0;
     const taxCentsVal = Number(taxCents) || 0;
     const totalCents = sumItemsCents(items);
+    const discountCents = computeAutoDiscountCents(items);
     const notesVal =
       customer?.notes != null && String(customer.notes).trim() ? String(customer.notes).trim() : undefined;
     const sessionNorm = String(clientCheckoutSessionId || "").trim();
@@ -1027,6 +1038,7 @@ router.post("/create-paypal-order", optionalCustomer, async (req, res) => {
         customerId: effectiveCustomerId,
         items,
         totalCents,
+        discountCents,
         shippingCents: shipCents,
         taxCents: taxCentsVal,
         notes: notesVal,
@@ -1143,6 +1155,7 @@ router.post("/capture-paypal-order", optionalCustomer, async (req, res) => {
       const shipCents = Number(shippingCents) || 0;
       const taxCentsVal = Number(taxCents) || 0;
       const totalCents = sumItemsCents(items);
+      const discountCents = computeAutoDiscountCents(items);
       const notesVal =
         customer?.notes != null && String(customer.notes).trim() ? String(customer.notes).trim() : undefined;
 
@@ -1158,6 +1171,7 @@ router.post("/capture-paypal-order", optionalCustomer, async (req, res) => {
               customer: buildOrderCustomer(customer),
               items,
               totalCents,
+              discountCents,
               shippingCents: shipCents,
               taxCents: taxCentsVal,
               notes: notesVal,
@@ -1182,6 +1196,7 @@ router.post("/capture-paypal-order", optionalCustomer, async (req, res) => {
         customer: buildOrderCustomer(customer),
         items,
         totalCents,
+        discountCents,
         shippingCents: shipCents,
         taxCents: taxCentsVal,
         notes: notesVal,
@@ -1419,6 +1434,7 @@ router.patch("/checkout-draft", optionalCustomer, async (req, res) => {
     }
     const effectiveCustomerId = req.customerUser?._id || cu._id;
     const totalCents = sumItemsCents(items);
+    const discountCents = computeAutoDiscountCents(items);
     const notesVal =
       customer?.notes != null && String(customer.notes).trim() ? String(customer.notes).trim() : undefined;
 
@@ -1489,6 +1505,7 @@ router.patch("/checkout-draft", optionalCustomer, async (req, res) => {
         paymentReferenceId,
         items,
         totalCents,
+        discountCents,
         shippingCents: shipCents,
         taxCents: taxCentsVal,
         customer: buildOrderCustomer(customer),

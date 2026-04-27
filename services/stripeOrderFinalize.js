@@ -5,16 +5,22 @@ import { getOrderCustomerView } from "./orderCustomer.js";
 import { notifyOrderPlaced } from "./orderEmails.js";
 import { invalidateAdminStatsCache } from "./adminStatsCache.js";
 
+import { sumItemsMerchandiseCents, computeAutoDiscountCents } from "./cartDiscounts.js";
+
 function sumItemsCents(items) {
-  if (!Array.isArray(items)) return 0;
-  return items.reduce((sum, i) => sum + (Number(i?.priceCents) || 0), 0);
+  return sumItemsMerchandiseCents(items);
 }
 
 /** Expected PI amount in cents from a persisted draft order. */
 export function expectedCentsFromOrder(order) {
   if (!order) return 0;
   const tax = Number(order.taxCents) || 0;
-  return sumItemsCents(order.items) + (Number(order.shippingCents) || 0) + tax;
+  const rawDisc = order.discountCents;
+  const disc =
+    rawDisc != null && Number.isFinite(Number(rawDisc))
+      ? Number(rawDisc)
+      : computeAutoDiscountCents(order.items || []);
+  return sumItemsCents(order.items) - disc + (Number(order.shippingCents) || 0) + tax;
 }
 
 function isLikelyMongoObjectId(s) {

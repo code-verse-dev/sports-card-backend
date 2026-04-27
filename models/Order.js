@@ -37,6 +37,8 @@ const orderSchema = new mongoose.Schema(
     },
     items: [{ type: mongoose.Schema.Types.Mixed }],
     totalCents: Number,
+    /** Automatic promo/team discount (merchandise); charged amount uses totalCents − discountCents + shipping + tax. */
+    discountCents: { type: Number, default: 0 },
     shippingCents: Number,
     /** Tax in cents (card checkout); included in Stripe PaymentIntent amount. */
     taxCents: { type: Number, default: 0 },

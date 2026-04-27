@@ -32,6 +32,15 @@ function formatMoney(cents) {
   return `$${(n / 100).toFixed(2)}`;
 }
 
+/** Amount charged: merchandise − discount + shipping + tax. */
+function paidTotalCents(order) {
+  const merch = Number(order?.totalCents) || 0;
+  const disc = Number(order?.discountCents) || 0;
+  const ship = Number(order?.shippingCents) || 0;
+  const tax = Number(order?.taxCents) || 0;
+  return merch - disc + ship + tax;
+}
+
 /** True if the customer paid for the digital PDF add-on on any line. */
 function orderIncludesPurchasedPdf(order) {
   const items = order.items || [];
@@ -75,14 +84,37 @@ function orderSummaryBlock(order) {
     </tr>`;
   });
   const ship = order.shippingCents ?? 0;
-  const total = (order.totalCents ?? 0) + ship;
+  const disc = Number(order.discountCents) || 0;
+  const tax = Number(order.taxCents) || 0;
+  const merch = Number(order.totalCents) || 0;
+  const discountRow =
+    disc > 0
+      ? `<tr style="background:#f8fafc;">
+    <td style="padding:12px 16px;font-family:Segoe UI,Roboto,Helvetica,Arial,sans-serif;font-size:14px;color:#64748b;">Discount</td>
+    <td style="padding:12px 16px;font-family:Segoe UI,Roboto,Helvetica,Arial,sans-serif;font-size:14px;color:#0f172a;text-align:right;font-weight:600;">−${formatMoney(disc)}</td>
+  </tr>`
+      : "";
+  const taxRow =
+    tax > 0
+      ? `<tr style="background:#f8fafc;">
+    <td style="padding:12px 16px;font-family:Segoe UI,Roboto,Helvetica,Arial,sans-serif;font-size:14px;color:#64748b;">Tax</td>
+    <td style="padding:12px 16px;font-family:Segoe UI,Roboto,Helvetica,Arial,sans-serif;font-size:14px;color:#0f172a;text-align:right;font-weight:600;">${formatMoney(tax)}</td>
+  </tr>`
+      : "";
+  const total = paidTotalCents(order);
   return `
 <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;margin:20px 0 8px;border:1px solid #e2e8f0;border-radius:12px;overflow:hidden;">
   ${rows.join("")}
   <tr style="background:#f8fafc;">
+    <td style="padding:12px 16px;font-family:Segoe UI,Roboto,Helvetica,Arial,sans-serif;font-size:14px;color:#64748b;">Merchandise subtotal</td>
+    <td style="padding:12px 16px;font-family:Segoe UI,Roboto,Helvetica,Arial,sans-serif;font-size:14px;color:#0f172a;text-align:right;font-weight:600;">${formatMoney(merch)}</td>
+  </tr>
+  ${discountRow}
+  <tr style="background:#f8fafc;">
     <td style="padding:12px 16px;font-family:Segoe UI,Roboto,Helvetica,Arial,sans-serif;font-size:14px;color:#64748b;">Shipping</td>
     <td style="padding:12px 16px;font-family:Segoe UI,Roboto,Helvetica,Arial,sans-serif;font-size:14px;color:#0f172a;text-align:right;font-weight:600;">${formatMoney(ship)}</td>
   </tr>
+  ${taxRow}
   <tr style="background:${accent};">
     <td style="padding:16px;font-family:Segoe UI,Roboto,Helvetica,Arial,sans-serif;font-size:15px;color:#ffffff;font-weight:700;">Total</td>
     <td style="padding:16px;font-family:Segoe UI,Roboto,Helvetica,Arial,sans-serif;font-size:18px;color:#ffffff;text-align:right;font-weight:700;">${formatMoney(total)}</td>
@@ -214,7 +246,7 @@ export async function sendOrderPlacedCustomerEmail(order, opts = {}) {
     to: email,
     subject: pdfAttached ? `Order received — #${ref} (PDF attached)` : `Order received — #${ref}`,
     html: wrapEmailHtml({ preheader, bodyHtml }),
-    text: `Hi ${customerName(order)}, we received your order #${ref}. Total ${formatMoney((order.totalCents ?? 0) + (order.shippingCents ?? 0))}. My orders: ${myAccountUrl()}`,
+    text: `Hi ${customerName(order)}, we received your order #${ref}. Total ${formatMoney(paidTotalCents(order))}. My orders: ${myAccountUrl()}`,
     attachments,
   });
 }
