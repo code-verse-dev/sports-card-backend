@@ -116,6 +116,7 @@ function orderToJson(doc) {
     customer: getOrderCustomerView(o) || {},
     items: o.items,
     totalCents: o.totalCents,
+    discountCents: o.discountCents != null ? o.discountCents : undefined,
     shippingCents: o.shippingCents,
     taxCents: o.taxCents != null ? o.taxCents : undefined,
     paymentLastError: o.paymentLastError || undefined,
@@ -1313,7 +1314,19 @@ app.get("/api/admin/stats", maybeRequireAdmin, async (req, res) => {
         Order.aggregate([{ $group: { _id: "$status", count: { $sum: 1 } } }]),
         Order.aggregate([
           { $match: { status: { $in: paidStatuses } } },
-          { $group: { _id: null, total: { $sum: { $add: ["$totalCents", { $ifNull: ["$shippingCents", 0] }] } } } },
+          {
+            $group: {
+              _id: null,
+              total: {
+                $sum: {
+                  $subtract: [
+                    { $add: ["$totalCents", { $ifNull: ["$shippingCents", 0] }, { $ifNull: ["$taxCents", 0] }] },
+                    { $ifNull: ["$discountCents", 0] },
+                  ],
+                },
+              },
+            },
+          },
         ]),
         Order.aggregate([
           { $match: { createdAt: { $gte: sevenDaysAgo } } },
@@ -1336,7 +1349,14 @@ app.get("/api/admin/stats", maybeRequireAdmin, async (req, res) => {
           {
             $group: {
               _id: { $dateToString: { format: "%Y-%m-%d", date: "$createdAt" } },
-              revenueCents: { $sum: { $add: ["$totalCents", { $ifNull: ["$shippingCents", 0] }] } },
+              revenueCents: {
+                $sum: {
+                  $subtract: [
+                    { $add: ["$totalCents", { $ifNull: ["$shippingCents", 0] }, { $ifNull: ["$taxCents", 0] }] },
+                    { $ifNull: ["$discountCents", 0] },
+                  ],
+                },
+              },
             },
           },
           { $sort: { _id: 1 } },
@@ -1384,7 +1404,8 @@ app.get("/api/admin/stats", maybeRequireAdmin, async (req, res) => {
     let totalRevenueCents = 0;
     list.forEach((o) => {
       if (paidStatuses.includes(o.status)) {
-        totalRevenueCents += (o.totalCents || 0) + (o.shippingCents || 0);
+        totalRevenueCents +=
+          (o.totalCents || 0) + (o.shippingCents || 0) + (o.taxCents || 0) - (o.discountCents || 0);
       }
     });
     const paidOrderCount = list.filter((o) => paidStatuses.includes(o.status)).length;
@@ -1401,7 +1422,7 @@ app.get("/api/admin/stats", maybeRequireAdmin, async (req, res) => {
       let rev = 0;
       list.forEach((o) => {
         if (!paidStatuses.includes(o.status) || !o.createdAt || !o.createdAt.startsWith(dateStr)) return;
-        rev += (o.totalCents || 0) + (o.shippingCents || 0);
+        rev += (o.totalCents || 0) + (o.shippingCents || 0) + (o.taxCents || 0) - (o.discountCents || 0);
       });
       revenueLast7DaysList.push({ date: dateStr, revenueCents: rev });
     }
