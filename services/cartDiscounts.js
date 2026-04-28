@@ -11,12 +11,11 @@ export function totalSetQuantity(items) {
 }
 
 const TEAM_MIN_SETS = 4;
-const FALL_MAX_MERCHANDISE_CENTS = 8000; // $80 — matches site “10% off purchase of $80 or less”
 const TEAM_PCT = 20;
 const FALL_PCT = 10;
 
 /**
- * Automatic discounts (mutually exclusive): 20% when ordering 4+ sets; otherwise 10% when merchandise ≤ $80.
+ * Automatic discounts (mutually exclusive): 20% when ordering 4+ sets; otherwise 10%.
  * Discount applies to merchandise only (not shipping).
  */
 export function computeAutoDiscountCents(items) {
@@ -26,10 +25,7 @@ export function computeAutoDiscountCents(items) {
   if (sets >= TEAM_MIN_SETS) {
     return Math.round((sub * TEAM_PCT) / 100);
   }
-  if (sub <= FALL_MAX_MERCHANDISE_CENTS) {
-    return Math.round((sub * FALL_PCT) / 100);
-  }
-  return 0;
+  return Math.round((sub * FALL_PCT) / 100);
 }
 
 /** Card / PayPal / PI total: discounted merchandise + shipping + tax. */
