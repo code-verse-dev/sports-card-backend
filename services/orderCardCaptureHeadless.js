@@ -75,7 +75,7 @@ export async function collectOrderCardCaptureJpegEntries(order) {
     await page.setBypassCSP(true).catch(() => {});
     page.setDefaultNavigationTimeout(gotoMs);
     page.setDefaultTimeout(waitFnMs);
-    /** Suppress noisy font-CSS failures (cdnfonts CORP); screenshots still succeed with fallback fonts. */
+    /** Suppress noisy third-party font-CSS failures; screenshots still succeed with fallback fonts. */
     const isNoisyFontFailure = (url, errText) =>
       /fonts\.cdnfonts\.com|fonts\.googleapis\.com/i.test(url) &&
       /NotSameOrigin|blocked.*response|ORB|ERR_BLOCKED/i.test(String(errText || ""));
