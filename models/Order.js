@@ -1,6 +1,21 @@
 import mongoose from "mongoose";
 import { ensureUniqueOrderCode } from "../services/publicCodes.js";
 
+const orderItemSchema = new mongoose.Schema(
+  {
+    templateId: { type: String, trim: true },
+    templateName: { type: String, trim: true },
+    quantity: { type: Number },
+    priceCents: { type: Number },
+    sizeOptionId: { type: String, trim: true },
+    pdfOption: { type: Boolean },
+    lineItems: [{ type: mongoose.Schema.Types.Mixed }],
+    designSnapshot: { type: mongoose.Schema.Types.Mixed },
+    designFontOverrides: { type: mongoose.Schema.Types.Mixed },
+  },
+  { _id: false, strict: false, minimize: false }
+);
+
 const orderSchema = new mongoose.Schema(
   {
     /** Unique 9-char A–Z0–9 reference for emails, admin, PDFs. Auto-assigned on save. */
@@ -35,7 +50,7 @@ const orderSchema = new mongoose.Schema(
       zip: String,
       country: String,
     },
-    items: [{ type: mongoose.Schema.Types.Mixed }],
+    items: [orderItemSchema],
     totalCents: Number,
     /** Automatic promo/team discount (merchandise); charged amount uses totalCents − discountCents + shipping + tax. */
     discountCents: { type: Number, default: 0 },
