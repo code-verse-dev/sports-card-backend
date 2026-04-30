@@ -71,7 +71,7 @@ app.post("/api/stripe/webhook", express.raw({ type: "application/json" }), (req,
     if (!res.headersSent) res.status(500).send("Internal error");
   });
 });
-app.use(express.json({ limit: "10mb" }));
+app.use(express.json({ limit: "25mb" }));
 
 /** Log every request when it finishes (so you see traffic in the terminal, not only `[orders]`). */
 app.use((req, res, next) => {
