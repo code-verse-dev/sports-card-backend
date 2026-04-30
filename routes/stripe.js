@@ -57,6 +57,44 @@ function computeHostedCheckoutSessionAmountCents(items, shippingCents) {
   return hostedCheckoutAmountCents(items, shippingCents);
 }
 
+function sanitizeItemsForOrderStorage(items) {
+  if (!Array.isArray(items)) return [];
+  return items.map((item) => (item && typeof item === "object" ? { ...item } : item));
+}
+
+function estimateJsonBytes(value) {
+  try {
+    return Buffer.byteLength(JSON.stringify(value), "utf8");
+  } catch {
+    return Number.POSITIVE_INFINITY;
+  }
+}
+
+function hasInlineImageDataUrlInItems(items) {
+  if (!Array.isArray(items)) return false;
+  for (const item of items) {
+    const snap = item?.designSnapshot;
+    if (!snap || typeof snap !== "object") continue;
+    for (const value of Object.values(snap)) {
+      if (typeof value === "string" && /^data:image\/[a-z0-9.+-]+;base64,/i.test(value.trim())) return true;
+    }
+  }
+  return false;
+}
+
+function validateCheckoutItemsPayload(items) {
+  if (!Array.isArray(items) || items.length === 0) return "items (non-empty array) required";
+  if (items.length > 250) return "Too many line items in checkout payload.";
+  if (hasInlineImageDataUrlInItems(items)) {
+    return "Checkout is still preparing design images. Please wait a moment and try again.";
+  }
+  const bytes = estimateJsonBytes(items);
+  if (!Number.isFinite(bytes) || bytes > 8 * 1024 * 1024) {
+    return "Checkout payload is too large. Please refresh checkout and try again.";
+  }
+  return null;
+}
+
 function isLikelyMongoObjectId(s) {
   return typeof s === "string" && s.length === 24 && /^[a-f0-9]+$/i.test(s);
 }
@@ -251,6 +289,7 @@ async function reopenStripePaymentFailedDraftForCreateIntent(stripe, orderLean, 
   const effectiveCustomerId = req.customerUser?._id || cu._id;
   const totalCents = sumItemsCents(items);
   const discountCents = computeAutoDiscountCents(items);
+  const storedItems = sanitizeItemsForOrderStorage(items);
   const notesVal =
     customer?.notes != null && String(customer.notes).trim() ? String(customer.notes).trim() : undefined;
 
@@ -284,7 +323,7 @@ async function reopenStripePaymentFailedDraftForCreateIntent(stripe, orderLean, 
     $set: {
       status: "pending_payment",
       paymentReferenceId: paymentIntent.id,
-      items,
+      items: storedItems,
       totalCents,
       discountCents,
       shippingCents: shipCents,
@@ -382,6 +421,8 @@ router.post("/create-checkout-session", optionalCustomer, async (req, res) => {
       orderWarn("POST /create-checkout-session 400: items invalid");
       return res.status(400).json({ error: "items (non-empty array) required" });
     }
+    const itemsPayloadErr = validateCheckoutItemsPayload(items);
+    if (itemsPayloadErr) return res.status(400).json({ error: itemsPayloadErr });
     const discountCents = computeAutoDiscountCents(items);
     const subtotalMerchCents = sumItemsCents(items);
     const subtotalChargedCents = subtotalMerchCents - discountCents;
@@ -465,8 +506,11 @@ router.post("/place-without-payment", optionalCustomer, async (req, res) => {
       orderWarn("POST /place-without-payment 400: items invalid");
       return res.status(400).json({ error: "items (non-empty array) required" });
     }
+    const itemsPayloadErr = validateCheckoutItemsPayload(items);
+    if (itemsPayloadErr) return res.status(400).json({ error: itemsPayloadErr });
     const totalCents = items.reduce((sum, i) => sum + (i.priceCents || 0), 0);
     const discountCents = computeAutoDiscountCents(items);
+    const storedItems = sanitizeItemsForOrderStorage(items);
     const shipCents = Number(shippingCents) || 0;
     const cu = await upsertCustomerFromCheckout(customer);
     if (!cu) {
@@ -476,7 +520,7 @@ router.post("/place-without-payment", optionalCustomer, async (req, res) => {
       status: "confirmed",
       paymentProvider: "manual",
       customerId: cu._id,
-      items,
+      items: storedItems,
       totalCents,
       discountCents,
       shippingCents: shipCents,
@@ -560,6 +604,8 @@ router.post("/confirm-session", optionalCustomer, async (req, res) => {
           "Order details missing. Use the same browser session after checkout, or contact support with your receipt.",
       });
     }
+    const itemsPayloadErr = validateCheckoutItemsPayload(items);
+    if (itemsPayloadErr) return res.status(400).json({ error: itemsPayloadErr });
     if (!isFullCustomerPayload(customer)) {
       return res
         .status(400)
@@ -578,6 +624,7 @@ router.post("/confirm-session", optionalCustomer, async (req, res) => {
     }
     const itemsTotal = items.reduce((sum, i) => sum + (Number(i.priceCents) || 0), 0);
     const discountCents = computeAutoDiscountCents(items);
+    const storedItems = sanitizeItemsForOrderStorage(items);
     const notesVal =
       customer?.notes != null && String(customer.notes).trim() ? String(customer.notes).trim() : undefined;
     const order = await Order.create({
@@ -586,7 +633,7 @@ router.post("/confirm-session", optionalCustomer, async (req, res) => {
       paymentReferenceId: sessionId,
       stripeSessionId: session.id,
       customerId: req.customerUser?._id || cu._id,
-      items,
+      items: storedItems,
       totalCents: itemsTotal,
       discountCents,
       shippingCents: shipCents,
@@ -629,6 +676,8 @@ router.post("/create-payment-intent", optionalCustomer, async (req, res) => {
       orderWarn("POST /create-payment-intent 400: items invalid");
       return res.status(400).json({ error: "items (non-empty array) required" });
     }
+    const itemsPayloadErr = validateCheckoutItemsPayload(items);
+    if (itemsPayloadErr) return res.status(400).json({ error: itemsPayloadErr });
     if (!isFullCustomerPayload(customer)) {
       orderWarn("POST /create-payment-intent 400: full customer required (complete billing on checkout first)");
       return res
@@ -731,6 +780,7 @@ router.post("/create-payment-intent", optionalCustomer, async (req, res) => {
     const taxCentsVal = Number(taxCents) || 0;
     const totalCents = sumItemsCents(items);
     const discountCents = computeAutoDiscountCents(items);
+    const storedItems = sanitizeItemsForOrderStorage(items);
     const notesVal =
       customer?.notes != null && String(customer.notes).trim() ? String(customer.notes).trim() : undefined;
 
@@ -746,7 +796,7 @@ router.post("/create-payment-intent", optionalCustomer, async (req, res) => {
       paymentProvider: "stripe",
       customer: buildOrderCustomer(customer),
       customerId: effectiveCustomerId,
-      items,
+      items: storedItems,
       totalCents,
       discountCents,
       shippingCents: shipCents,
@@ -839,6 +889,8 @@ router.post("/confirm-payment", optionalCustomer, async (req, res) => {
         error: "Order details missing. Return to checkout with the same browser session, or contact support with your payment receipt.",
       });
     }
+    const itemsPayloadErr = validateCheckoutItemsPayload(items);
+    if (itemsPayloadErr) return res.status(400).json({ error: itemsPayloadErr });
     const expectedCents = computeCardCheckoutAmountCents(items, shippingCents, taxCents);
     if (expectedCents !== paymentIntent.amount) {
       orderWarn(`POST /confirm-payment 400: amount mismatch pi=${paymentIntent.amount} calc=${expectedCents}`);
@@ -858,6 +910,7 @@ router.post("/confirm-payment", optionalCustomer, async (req, res) => {
     const taxCentsVal = Number(taxCents) || 0;
     const totalCents = sumItemsCents(items);
     const discountCents = computeAutoDiscountCents(items);
+    const storedItems = sanitizeItemsForOrderStorage(items);
     const notesVal =
       mergedForSave.notes != null && String(mergedForSave.notes).trim()
         ? String(mergedForSave.notes).trim()
@@ -870,7 +923,7 @@ router.post("/confirm-payment", optionalCustomer, async (req, res) => {
       paymentProvider: "stripe",
       paymentReferenceId: paymentIntentId,
       customerId: req.customerUser?._id || cu._id,
-      items,
+      items: storedItems,
       totalCents,
       discountCents,
       shippingCents: shipCents,
@@ -948,6 +1001,8 @@ router.post("/create-paypal-order", optionalCustomer, async (req, res) => {
       orderWarn("POST /create-paypal-order 400: items invalid");
       return res.status(400).json({ error: "items (non-empty array) required" });
     }
+    const itemsPayloadErr = validateCheckoutItemsPayload(items);
+    if (itemsPayloadErr) return res.status(400).json({ error: itemsPayloadErr });
     if (!isFullCustomerPayload(customer)) {
       orderWarn("POST /create-paypal-order 400: full customer required");
       return res
@@ -1024,6 +1079,7 @@ router.post("/create-paypal-order", optionalCustomer, async (req, res) => {
     const taxCentsVal = Number(taxCents) || 0;
     const totalCents = sumItemsCents(items);
     const discountCents = computeAutoDiscountCents(items);
+    const storedItems = sanitizeItemsForOrderStorage(items);
     const notesVal =
       customer?.notes != null && String(customer.notes).trim() ? String(customer.notes).trim() : undefined;
     const sessionNorm = String(clientCheckoutSessionId || "").trim();
@@ -1036,7 +1092,7 @@ router.post("/create-paypal-order", optionalCustomer, async (req, res) => {
         paypalPlacementRef: placementRef,
         customer: buildOrderCustomer(customer),
         customerId: effectiveCustomerId,
-        items,
+        items: storedItems,
         totalCents,
         discountCents,
         shippingCents: shipCents,
@@ -1083,6 +1139,8 @@ router.post("/capture-paypal-order", optionalCustomer, async (req, res) => {
       if (!items?.length || !Array.isArray(items)) {
         return res.status(400).json({ error: "items (non-empty array) required" });
       }
+      const itemsPayloadErr = validateCheckoutItemsPayload(items);
+      if (itemsPayloadErr) return res.status(400).json({ error: itemsPayloadErr });
       if (!isFullCustomerPayload(customer)) {
         return res
           .status(400)
@@ -1156,6 +1214,7 @@ router.post("/capture-paypal-order", optionalCustomer, async (req, res) => {
       const taxCentsVal = Number(taxCents) || 0;
       const totalCents = sumItemsCents(items);
       const discountCents = computeAutoDiscountCents(items);
+      const storedItems = sanitizeItemsForOrderStorage(items);
       const notesVal =
         customer?.notes != null && String(customer.notes).trim() ? String(customer.notes).trim() : undefined;
 
@@ -1169,7 +1228,7 @@ router.post("/capture-paypal-order", optionalCustomer, async (req, res) => {
               paymentReferenceId: captureKey,
               customerId: req.customerUser?._id || cu._id,
               customer: buildOrderCustomer(customer),
-              items,
+              items: storedItems,
               totalCents,
               discountCents,
               shippingCents: shipCents,
@@ -1194,7 +1253,7 @@ router.post("/capture-paypal-order", optionalCustomer, async (req, res) => {
         paymentReferenceId: captureKey,
         customerId: req.customerUser?._id || cu._id,
         customer: buildOrderCustomer(customer),
-        items,
+        items: storedItems,
         totalCents,
         discountCents,
         shippingCents: shipCents,
@@ -1395,6 +1454,8 @@ router.patch("/checkout-draft", optionalCustomer, async (req, res) => {
     if (!items?.length || !Array.isArray(items)) {
       return res.status(400).json({ error: "items (non-empty array) required" });
     }
+    const itemsPayloadErr = validateCheckoutItemsPayload(items);
+    if (itemsPayloadErr) return res.status(400).json({ error: itemsPayloadErr });
     if (!isFullCustomerPayload(customer)) {
       return res.status(400).json({ error: "Full billing is required." });
     }
@@ -1435,6 +1496,7 @@ router.patch("/checkout-draft", optionalCustomer, async (req, res) => {
     const effectiveCustomerId = req.customerUser?._id || cu._id;
     const totalCents = sumItemsCents(items);
     const discountCents = computeAutoDiscountCents(items);
+    const storedItems = sanitizeItemsForOrderStorage(items);
     const notesVal =
       customer?.notes != null && String(customer.notes).trim() ? String(customer.notes).trim() : undefined;
 
@@ -1503,7 +1565,7 @@ router.patch("/checkout-draft", optionalCustomer, async (req, res) => {
       $set: {
         status: "pending_payment",
         paymentReferenceId,
-        items,
+        items: storedItems,
         totalCents,
         discountCents,
         shippingCents: shipCents,
