@@ -4,10 +4,13 @@ export function sumItemsMerchandiseCents(items) {
   return items.reduce((sum, i) => sum + (Number(i?.priceCents) || 0), 0);
 }
 
-/** Total card quantity across lines (team “4+ sets” rule). */
+/** Total sets across cart entries/lineItems (team “4+ sets” rule). */
 export function totalSetQuantity(items) {
   if (!Array.isArray(items)) return 0;
-  return items.reduce((sum, i) => sum + (Number(i?.quantity) || 0), 0);
+  return items.reduce((sum, i) => {
+    const lineCount = Array.isArray(i?.lineItems) && i.lineItems.length > 0 ? i.lineItems.length : 1;
+    return sum + lineCount;
+  }, 0);
 }
 
 const TEAM_MIN_SETS = 4;
