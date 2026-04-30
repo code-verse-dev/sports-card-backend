@@ -63,6 +63,7 @@ import {
 const app = express();
 const PORT = Number(process.env.PORT) || 4043;
 const HOST = (process.env.HOST && String(process.env.HOST).trim() && process.env.HOST !== "null") ? process.env.HOST.trim() : "0.0.0.0";
+const JSON_BODY_LIMIT = String(process.env.JSON_BODY_LIMIT || "50mb").trim() || "50mb";
 
 app.use(cors({ origin: true, credentials: true, allowedHeaders: ["Content-Type", "Authorization"] }));
 app.post("/api/stripe/webhook", express.raw({ type: "application/json" }), (req, res) => {
@@ -71,7 +72,7 @@ app.post("/api/stripe/webhook", express.raw({ type: "application/json" }), (req,
     if (!res.headersSent) res.status(500).send("Internal error");
   });
 });
-app.use(express.json({ limit: "25mb" }));
+app.use(express.json({ limit: JSON_BODY_LIMIT }));
 
 /** Log every request when it finishes (so you see traffic in the terminal, not only `[orders]`). */
 app.use((req, res, next) => {
@@ -81,6 +82,15 @@ app.use((req, res, next) => {
     console.log(`[http] ${req.method} ${req.originalUrl || req.url} ${res.statusCode} ${ms}ms`);
   });
   next();
+});
+
+app.use((err, req, res, next) => {
+  if (err?.type === "entity.too.large") {
+    return res.status(413).json({
+      error: "Request payload is too large. Please wait for image upload processing, then try checkout again.",
+    });
+  }
+  return next(err);
 });
 
 /** When DB is connected, require admin JWT; otherwise no-op (legacy in-memory mode). */

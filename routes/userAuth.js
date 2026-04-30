@@ -91,32 +91,36 @@ router.post("/register", async (req, res) => {
 
 /** POST /api/user/login - body: { email, password }. Returns { token, user: { email, firstName, lastName } }. */
 router.post("/login", async (req, res) => {
-  if (!dbConnected()) {
-    return res.status(503).json({ error: "Login is not available" });
+  try {
+    if (!dbConnected()) {
+      return res.status(503).json({ error: "Login is not available" });
+    }
+    const { email, password } = req.body || {};
+    const e = String(email || "").trim().toLowerCase();
+    const p = String(password || "").trim();
+    if (!e || !p) {
+      return res.status(400).json({ error: "Email and password required" });
+    }
+    const user = await CustomerUser.findOne({ email: e }).select("+passwordHash");
+    if (!user || !user.passwordHash) {
+      return res.status(401).json({ error: "Invalid email or password" });
+    }
+    const ok = await user.comparePassword(p);
+    if (!ok) {
+      return res.status(401).json({ error: "Invalid email or password" });
+    }
+    const token = signToken({ userId: user._id.toString(), type: "customer" });
+    res.json({
+      token,
+      user: {
+        email: user.email,
+        firstName: user.firstName,
+        lastName: user.lastName,
+      },
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message || "Login failed" });
   }
-  const { email, password } = req.body || {};
-  const e = String(email || "").trim().toLowerCase();
-  const p = String(password || "").trim();
-  if (!e || !p) {
-    return res.status(400).json({ error: "Email and password required" });
-  }
-  const user = await CustomerUser.findOne({ email: e }).select("+passwordHash");
-  if (!user || !user.passwordHash) {
-    return res.status(401).json({ error: "Invalid email or password" });
-  }
-  const ok = await user.comparePassword(p);
-  if (!ok) {
-    return res.status(401).json({ error: "Invalid email or password" });
-  }
-  const token = signToken({ userId: user._id.toString(), type: "customer" });
-  res.json({
-    token,
-    user: {
-      email: user.email,
-      firstName: user.firstName,
-      lastName: user.lastName,
-    },
-  });
 });
 
 /** GET /api/user/me - requires auth. Returns current user profile including saved billing. */

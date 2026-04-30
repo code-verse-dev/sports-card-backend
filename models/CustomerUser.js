@@ -59,7 +59,8 @@ customerUserSchema.pre("save", async function customerPublicIdPreSave(next) {
 });
 
 customerUserSchema.methods.comparePassword = async function (plain) {
-  if (!this.passwordHash) return false;
+  if (typeof plain !== "string" || !plain) return false;
+  if (typeof this.passwordHash !== "string" || !this.passwordHash) return false;
   return bcrypt.compare(plain, this.passwordHash);
 };
 
