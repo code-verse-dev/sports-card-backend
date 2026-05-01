@@ -32,6 +32,7 @@ import {
   hostedCheckoutAmountCents,
   allocateDiscountAcrossItems,
 } from "../services/cartDiscounts.js";
+import { materializeInlineSnapshotsInItems } from "../services/checkoutSnapshotMaterialize.js";
 
 const router = Router();
 const stripe = process.env.STRIPE_SECRET_KEY ? new Stripe(process.env.STRIPE_SECRET_KEY, { apiVersion: "2024-11-20.acacia" }) : null;
@@ -104,6 +105,22 @@ function validateCheckoutItemsPayload(items) {
     return "Checkout payload is too large. Please refresh checkout and try again.";
   }
   return null;
+}
+
+async function materializeAndValidateCheckoutItems(items, res) {
+  try {
+    await materializeInlineSnapshotsInItems(items);
+  } catch (e) {
+    orderWarn(`checkout snapshot materialize: ${e?.message || e}`);
+    res.status(400).json({ error: String(e?.message || "Could not store design images for checkout.") });
+    return false;
+  }
+  const itemsPayloadErr = validateCheckoutItemsPayload(items);
+  if (itemsPayloadErr) {
+    res.status(400).json({ error: itemsPayloadErr });
+    return false;
+  }
+  return true;
 }
 
 function isLikelyMongoObjectId(s) {
@@ -432,8 +449,7 @@ router.post("/create-checkout-session", optionalCustomer, async (req, res) => {
       orderWarn("POST /create-checkout-session 400: items invalid");
       return res.status(400).json({ error: "items (non-empty array) required" });
     }
-    const itemsPayloadErr = validateCheckoutItemsPayload(items);
-    if (itemsPayloadErr) return res.status(400).json({ error: itemsPayloadErr });
+    if (!(await materializeAndValidateCheckoutItems(items, res))) return;
     const discountCents = computeAutoDiscountCents(items);
     const subtotalMerchCents = sumItemsCents(items);
     const subtotalChargedCents = subtotalMerchCents - discountCents;
@@ -517,8 +533,7 @@ router.post("/place-without-payment", optionalCustomer, async (req, res) => {
       orderWarn("POST /place-without-payment 400: items invalid");
       return res.status(400).json({ error: "items (non-empty array) required" });
     }
-    const itemsPayloadErr = validateCheckoutItemsPayload(items);
-    if (itemsPayloadErr) return res.status(400).json({ error: itemsPayloadErr });
+    if (!(await materializeAndValidateCheckoutItems(items, res))) return;
     const totalCents = items.reduce((sum, i) => sum + (i.priceCents || 0), 0);
     const discountCents = computeAutoDiscountCents(items);
     const storedItems = sanitizeItemsForOrderStorage(items);
@@ -615,8 +630,7 @@ router.post("/confirm-session", optionalCustomer, async (req, res) => {
           "Order details missing. Use the same browser session after checkout, or contact support with your receipt.",
       });
     }
-    const itemsPayloadErr = validateCheckoutItemsPayload(items);
-    if (itemsPayloadErr) return res.status(400).json({ error: itemsPayloadErr });
+    if (!(await materializeAndValidateCheckoutItems(items, res))) return;
     if (!isFullCustomerPayload(customer)) {
       return res
         .status(400)
@@ -687,8 +701,7 @@ router.post("/create-payment-intent", optionalCustomer, async (req, res) => {
       orderWarn("POST /create-payment-intent 400: items invalid");
       return res.status(400).json({ error: "items (non-empty array) required" });
     }
-    const itemsPayloadErr = validateCheckoutItemsPayload(items);
-    if (itemsPayloadErr) return res.status(400).json({ error: itemsPayloadErr });
+    if (!(await materializeAndValidateCheckoutItems(items, res))) return;
     if (!isFullCustomerPayload(customer)) {
       orderWarn("POST /create-payment-intent 400: full customer required (complete billing on checkout first)");
       return res
@@ -900,8 +913,7 @@ router.post("/confirm-payment", optionalCustomer, async (req, res) => {
         error: "Order details missing. Return to checkout with the same browser session, or contact support with your payment receipt.",
       });
     }
-    const itemsPayloadErr = validateCheckoutItemsPayload(items);
-    if (itemsPayloadErr) return res.status(400).json({ error: itemsPayloadErr });
+    if (!(await materializeAndValidateCheckoutItems(items, res))) return;
     const expectedCents = computeCardCheckoutAmountCents(items, shippingCents, taxCents);
     if (expectedCents !== paymentIntent.amount) {
       orderWarn(`POST /confirm-payment 400: amount mismatch pi=${paymentIntent.amount} calc=${expectedCents}`);
@@ -1012,8 +1024,7 @@ router.post("/create-paypal-order", optionalCustomer, async (req, res) => {
       orderWarn("POST /create-paypal-order 400: items invalid");
       return res.status(400).json({ error: "items (non-empty array) required" });
     }
-    const itemsPayloadErr = validateCheckoutItemsPayload(items);
-    if (itemsPayloadErr) return res.status(400).json({ error: itemsPayloadErr });
+    if (!(await materializeAndValidateCheckoutItems(items, res))) return;
     if (!isFullCustomerPayload(customer)) {
       orderWarn("POST /create-paypal-order 400: full customer required");
       return res
@@ -1150,8 +1161,7 @@ router.post("/capture-paypal-order", optionalCustomer, async (req, res) => {
       if (!items?.length || !Array.isArray(items)) {
         return res.status(400).json({ error: "items (non-empty array) required" });
       }
-      const itemsPayloadErr = validateCheckoutItemsPayload(items);
-      if (itemsPayloadErr) return res.status(400).json({ error: itemsPayloadErr });
+      if (!(await materializeAndValidateCheckoutItems(items, res))) return;
       if (!isFullCustomerPayload(customer)) {
         return res
           .status(400)
@@ -1465,8 +1475,7 @@ router.patch("/checkout-draft", optionalCustomer, async (req, res) => {
     if (!items?.length || !Array.isArray(items)) {
       return res.status(400).json({ error: "items (non-empty array) required" });
     }
-    const itemsPayloadErr = validateCheckoutItemsPayload(items);
-    if (itemsPayloadErr) return res.status(400).json({ error: itemsPayloadErr });
+    if (!(await materializeAndValidateCheckoutItems(items, res))) return;
     if (!isFullCustomerPayload(customer)) {
       return res.status(400).json({ error: "Full billing is required." });
     }
