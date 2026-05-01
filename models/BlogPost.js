@@ -10,6 +10,15 @@ const blogPostSchema = new mongoose.Schema(
     publishedAt: { type: Date },
     metaTitle: { type: String, default: "" },
     metaDescription: { type: String, default: "" },
+    faqs: {
+      type: [
+        {
+          question: { type: String, default: "" },
+          answer: { type: String, default: "" },
+        },
+      ],
+      default: [],
+    },
   },
   { timestamps: true }
 );

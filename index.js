@@ -7,9 +7,10 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 import express from "express";
 import cors from "cors";
 import jwt from "jsonwebtoken";
+import mongoose from "mongoose";
 import fs from "fs/promises";
 import { connectDB, dbConnected } from "./db.js";
-import { requireAdmin } from "./middleware/auth.js";
+import { requireAdmin, requireCustomer, optionalCustomer } from "./middleware/auth.js";
 import adminAuthRouter from "./routes/adminAuth.js";
 import userAuthRouter from "./routes/userAuth.js";
 import stripeRouter from "./routes/stripe.js";
@@ -34,6 +35,8 @@ import { Template } from "./models/Template.js";
 import { Category } from "./models/Category.js";
 import { Subcategory } from "./models/Subcategory.js";
 import { BlogPost } from "./models/BlogPost.js";
+import { BlogComment } from "./models/BlogComment.js";
+import { BlogLike } from "./models/BlogLike.js";
 import { FEATURED_BLOG_SEEDS, seedContentHtml } from "./data/featured-blog-seeds.js";
 import { getPriceConfig, setPriceConfig } from "./models/PriceConfig.js";
 import { AdminUser, hashPassword } from "./models/AdminUser.js";
@@ -1508,9 +1511,32 @@ async function ensureUniqueBlogSlug(slugInput, excludeMongoId) {
   }
 }
 
+function normalizeBlogFaqs(input) {
+  if (!input || !Array.isArray(input)) return [];
+  const out = [];
+  for (const row of input) {
+    if (!row || typeof row !== "object") continue;
+    const question = row.question != null ? String(row.question).trim() : "";
+    const answer = row.answer != null ? String(row.answer).trim() : "";
+    if (!question && !answer) continue;
+    out.push({
+      question: question.slice(0, 500),
+      answer: answer.slice(0, 8000),
+    });
+  }
+  return out.slice(0, 80);
+}
+
 function blogPostToJson(doc) {
   if (!doc) return null;
   const o = doc.toObject ? doc.toObject() : doc;
+  const faqsRaw = o.faqs;
+  const faqs = Array.isArray(faqsRaw)
+    ? faqsRaw.map((f) => ({
+        question: f?.question != null ? String(f.question) : "",
+        answer: f?.answer != null ? String(f.answer) : "",
+      }))
+    : [];
   return {
     id: o._id?.toString() ?? o.id,
     title: o.title,
@@ -1521,6 +1547,7 @@ function blogPostToJson(doc) {
     publishedAt: o.publishedAt,
     metaTitle: o.metaTitle ?? "",
     metaDescription: o.metaDescription ?? "",
+    faqs,
     createdAt: o.createdAt,
     updatedAt: o.updatedAt,
   };
@@ -1539,6 +1566,168 @@ app.get("/api/blog/posts", async (req, res) => {
       id: row._id?.toString(),
     }));
     res.json(out);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+/** Published blog post by slug or null */
+async function getPublishedBlogPostIdBySlug(slug) {
+  const s = String(slug || "").trim();
+  if (!s) return null;
+  const doc = await BlogPost.findOne({ slug: s, published: true }).select("_id").lean();
+  return doc || null;
+}
+
+app.get("/api/blog/posts/:slug/comments", optionalCustomer, async (req, res) => {
+  try {
+    if (!dbConnected()) return res.status(503).json({ error: "Database not connected" });
+    const slug = String(req.params.slug || "").trim();
+    const post = await getPublishedBlogPostIdBySlug(slug);
+    if (!post) return res.status(404).json({ error: "Not found" });
+
+    const limit = Math.min(100, Math.max(1, parseInt(String(req.query.limit || "50"), 10) || 50));
+    const skip = Math.max(0, parseInt(String(req.query.skip || "0"), 10) || 0);
+
+    const [total, docs] = await Promise.all([
+      BlogComment.countDocuments({ blogPost: post._id }),
+      BlogComment.find({ blogPost: post._id })
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(limit)
+        .populate("authorId", "firstName lastName")
+        .lean(),
+    ]);
+
+    const customerId = req.customerUser?._id ? String(req.customerUser._id) : null;
+
+    const comments = docs.map((c) => {
+      const aid = c.authorId;
+      const authorMongoId =
+        aid && typeof aid === "object" && aid._id != null
+          ? String(aid._id)
+          : aid
+            ? String(aid)
+            : "";
+      const firstName = aid && typeof aid === "object" ? aid.firstName : "";
+      const lastName = aid && typeof aid === "object" ? aid.lastName : "";
+      const displayName = [firstName, lastName].filter(Boolean).join(" ").trim() || "Member";
+      const isMine = Boolean(customerId && authorMongoId && customerId === authorMongoId);
+      return {
+        id: c._id?.toString(),
+        body: c.body,
+        createdAt: c.createdAt,
+        updatedAt: c.updatedAt,
+        author: { displayName, id: authorMongoId },
+        isMine,
+      };
+    });
+
+    res.json({ comments, total, skip, limit });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post("/api/blog/posts/:slug/comments", requireCustomer, async (req, res) => {
+  try {
+    if (!dbConnected()) return res.status(503).json({ error: "Database not connected" });
+    const slug = String(req.params.slug || "").trim();
+    const post = await getPublishedBlogPostIdBySlug(slug);
+    if (!post) return res.status(404).json({ error: "Not found" });
+
+    const raw = req.body?.body != null ? String(req.body.body) : "";
+    const body = raw.trim();
+    if (!body) return res.status(400).json({ error: "Comment cannot be empty" });
+    if (body.length > 2000) return res.status(400).json({ error: "Comment is too long" });
+
+    const doc = await BlogComment.create({
+      blogPost: post._id,
+      authorId: req.customerUser._id,
+      body,
+    });
+    await doc.populate("authorId", "firstName lastName");
+    const aid = doc.authorId;
+    const displayName =
+      [aid?.firstName, aid?.lastName].filter(Boolean).join(" ").trim() || "Member";
+    res.status(201).json({
+      id: doc._id.toString(),
+      body: doc.body,
+      createdAt: doc.createdAt,
+      updatedAt: doc.updatedAt,
+      author: { displayName, id: String(req.customerUser._id) },
+      isMine: true,
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.delete("/api/blog/posts/:slug/comments/:commentId", requireCustomer, async (req, res) => {
+  try {
+    if (!dbConnected()) return res.status(503).json({ error: "Database not connected" });
+    const slug = String(req.params.slug || "").trim();
+    const commentId = String(req.params.commentId || "").trim();
+    if (!slug || !commentId) return res.status(400).json({ error: "Invalid request" });
+    if (!mongoose.Types.ObjectId.isValid(commentId)) return res.status(400).json({ error: "Invalid comment id" });
+
+    const post = await getPublishedBlogPostIdBySlug(slug);
+    if (!post) return res.status(404).json({ error: "Not found" });
+
+    const c = await BlogComment.findOne({ _id: commentId, blogPost: post._id });
+    if (!c) return res.status(404).json({ error: "Not found" });
+    if (String(c.authorId) !== String(req.customerUser._id)) {
+      return res.status(403).json({ error: "Forbidden" });
+    }
+    await BlogComment.deleteOne({ _id: c._id });
+    res.status(204).send();
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get("/api/blog/posts/:slug/likes", optionalCustomer, async (req, res) => {
+  try {
+    if (!dbConnected()) return res.status(503).json({ error: "Database not connected" });
+    const slug = String(req.params.slug || "").trim();
+    const post = await getPublishedBlogPostIdBySlug(slug);
+    if (!post) return res.status(404).json({ error: "Not found" });
+
+    const [count, likedRow] = await Promise.all([
+      BlogLike.countDocuments({ blogPost: post._id }),
+      req.customerUser
+        ? BlogLike.findOne({ blogPost: post._id, userId: req.customerUser._id }).select("_id").lean()
+        : Promise.resolve(null),
+    ]);
+
+    res.json({
+      count,
+      likedByMe: Boolean(likedRow),
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post("/api/blog/posts/:slug/likes/toggle", requireCustomer, async (req, res) => {
+  try {
+    if (!dbConnected()) return res.status(503).json({ error: "Database not connected" });
+    const slug = String(req.params.slug || "").trim();
+    const post = await getPublishedBlogPostIdBySlug(slug);
+    if (!post) return res.status(404).json({ error: "Not found" });
+
+    const existing = await BlogLike.findOne({ blogPost: post._id, userId: req.customerUser._id });
+    let liked;
+    if (existing) {
+      await BlogLike.deleteOne({ _id: existing._id });
+      liked = false;
+    } else {
+      await BlogLike.create({ blogPost: post._id, userId: req.customerUser._id });
+      liked = true;
+    }
+
+    const count = await BlogLike.countDocuments({ blogPost: post._id });
+    res.json({ liked, count });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
@@ -1601,6 +1790,7 @@ app.post("/api/admin/blog-posts", maybeRequireAdmin, async (req, res) => {
       publishedAt,
       metaTitle: body.metaTitle != null ? String(body.metaTitle) : "",
       metaDescription: body.metaDescription != null ? String(body.metaDescription) : "",
+      faqs: normalizeBlogFaqs(body.faqs),
     });
     res.status(201).json(blogPostToJson(doc));
   } catch (e) {
@@ -1631,6 +1821,9 @@ app.put("/api/admin/blog-posts/:id", maybeRequireAdmin, async (req, res) => {
     }
     if (body.publishedAt !== undefined && doc.published) {
       doc.publishedAt = body.publishedAt ? new Date(body.publishedAt) : new Date();
+    }
+    if (body.faqs !== undefined) {
+      doc.faqs = normalizeBlogFaqs(body.faqs);
     }
     await doc.save();
     res.json(blogPostToJson(doc));
