@@ -58,6 +58,24 @@ const upload = multer({
   },
 });
 
+function handleSingleImageUpload(req, res) {
+  if (!req.file) {
+    return res.status(400).json({ error: "Missing file (field: file)" });
+  }
+  const id = path.parse(req.file.filename).name;
+  res.status(201).json({ id, originalName: req.file.originalname || req.file.filename, mimeType: req.file.mimetype });
+}
+
+/**
+ * Register before `app.use("/api/orders", stripeRouter)` in index.js so the route is hit first.
+ * Public POST for checkout design images — same disk + response as /api/admin/uploads, but under
+ * /api/orders/ so reverse proxies that only forward /api/orders to Node (not /api/admin) work in production.
+ */
+export function registerCheckoutDesignUpload(app) {
+  ensureUploadsDir().catch((err) => console.error("Uploads dir init:", err));
+  app.post("/api/orders/checkout-upload", upload.single("file"), handleSingleImageUpload);
+}
+
 export function registerUploadsRouter(app) {
   ensureUploadsDir().catch((err) => console.error("Uploads dir init:", err));
 
@@ -111,13 +129,7 @@ export function registerUploadsRouter(app) {
     }
   });
 
-  app.post("/api/admin/uploads", upload.single("file"), async (req, res) => {
-    if (!req.file) {
-      return res.status(400).json({ error: "Missing file (field: file)" });
-    }
-    const id = path.parse(req.file.filename).name;
-    res.status(201).json({ id, originalName: req.file.originalname || req.file.filename, mimeType: req.file.mimetype });
-  });
+  app.post("/api/admin/uploads", upload.single("file"), handleSingleImageUpload);
 
   app.get("/api/admin/uploads", async (_req, res) => {
     try {
