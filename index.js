@@ -15,7 +15,7 @@ import adminAuthRouter from "./routes/adminAuth.js";
 import userAuthRouter from "./routes/userAuth.js";
 import stripeRouter from "./routes/stripe.js";
 import { handleRawStripeWebhook } from "./routes/stripeWebhook.js";
-import { registerUploadsRouter } from "./uploads-router.js";
+import { registerUploadsRouter, registerCheckoutDesignUpload } from "./uploads-router.js";
 import { listCategories, listSubcategories, upsertCategory, upsertSubcategory, deleteCategoryById, deleteSubcategoryById, getCategoryById, getSubcategoryById } from "./categories-db.js";
 import { DEFAULT_CATEGORIES, DEFAULT_SUBCATEGORIES } from "./seed-categories.js";
 import {
@@ -588,6 +588,8 @@ app.get("/api/orders/internal/order-items-for-capture", async (req, res) => {
 });
 
 // ---------- Public: Stripe checkout (create session, confirm) ----------
+// Checkout client uploads must live under /api/orders so nginx/proxies that route `/api/orders` reach Node (many setups skip `/api/admin`).
+registerCheckoutDesignUpload(app);
 app.use("/api/orders", stripeRouter);
 
 // ---------- Customer (store) auth: login, register, orders ----------
