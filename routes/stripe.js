@@ -70,14 +70,25 @@ function estimateJsonBytes(value) {
   }
 }
 
+function isInlineImageDataUrlString(s) {
+  if (typeof s !== "string") return false;
+  const t = s.trim();
+  return t.startsWith("data:image/") && t.includes(";base64,");
+}
+
+function valueHasInlineImageDataUrl(value) {
+  if (isInlineImageDataUrlString(value)) return true;
+  if (value && typeof value === "object") {
+    if (Array.isArray(value)) return value.some((v) => valueHasInlineImageDataUrl(v));
+    return Object.values(value).some((v) => valueHasInlineImageDataUrl(v));
+  }
+  return false;
+}
+
 function hasInlineImageDataUrlInItems(items) {
   if (!Array.isArray(items)) return false;
   for (const item of items) {
-    const snap = item?.designSnapshot;
-    if (!snap || typeof snap !== "object") continue;
-    for (const value of Object.values(snap)) {
-      if (typeof value === "string" && /^data:image\/[a-z0-9.+-]+;base64,/i.test(value.trim())) return true;
-    }
+    if (valueHasInlineImageDataUrl(item?.designSnapshot)) return true;
   }
   return false;
 }
