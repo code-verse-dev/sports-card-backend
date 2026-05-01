@@ -33,6 +33,8 @@ import { Order } from "./models/Order.js";
 import { Template } from "./models/Template.js";
 import { Category } from "./models/Category.js";
 import { Subcategory } from "./models/Subcategory.js";
+import { BlogPost } from "./models/BlogPost.js";
+import { FEATURED_BLOG_SEEDS, seedContentHtml } from "./data/featured-blog-seeds.js";
 import { getPriceConfig, setPriceConfig } from "./models/PriceConfig.js";
 import { AdminUser, hashPassword } from "./models/AdminUser.js";
 import { CustomerUser, hashCustomerPassword } from "./models/CustomerUser.js";
@@ -1482,6 +1484,208 @@ app.put("/api/admin/prices", maybeRequireAdmin, async (req, res) => {
   }
 });
 
+// ---------- Blog posts (DB) — admin CRUD; public list/read for storefront ----------
+function slugifyBlogTitle(title) {
+  const base = String(title || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-|-$/g, "");
+  return base || "post";
+}
+
+async function ensureUniqueBlogSlug(slugInput, excludeMongoId) {
+  const base = slugifyBlogTitle(slugInput);
+  let candidate = base;
+  let n = 2;
+  for (;;) {
+    const q = { slug: candidate };
+    if (excludeMongoId) q._id = { $ne: excludeMongoId };
+    const exists = await BlogPost.exists(q);
+    if (!exists) return candidate;
+    candidate = `${base}-${n}`;
+    n += 1;
+  }
+}
+
+function blogPostToJson(doc) {
+  if (!doc) return null;
+  const o = doc.toObject ? doc.toObject() : doc;
+  return {
+    id: o._id?.toString() ?? o.id,
+    title: o.title,
+    slug: o.slug,
+    excerpt: o.excerpt ?? "",
+    contentHtml: o.contentHtml ?? "",
+    published: Boolean(o.published),
+    publishedAt: o.publishedAt,
+    metaTitle: o.metaTitle ?? "",
+    metaDescription: o.metaDescription ?? "",
+    createdAt: o.createdAt,
+    updatedAt: o.updatedAt,
+  };
+}
+
+/** Published posts for the public blog (optional storefront use). */
+app.get("/api/blog/posts", async (req, res) => {
+  try {
+    if (!dbConnected()) return res.status(503).json({ error: "Database not connected" });
+    const list = await BlogPost.find({ published: true })
+      .sort({ publishedAt: -1, updatedAt: -1 })
+      .select("title slug excerpt published publishedAt updatedAt createdAt metaTitle metaDescription")
+      .lean();
+    const out = list.map((row) => ({
+      ...row,
+      id: row._id?.toString(),
+    }));
+    res.json(out);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get("/api/blog/posts/:slug", async (req, res) => {
+  try {
+    if (!dbConnected()) return res.status(503).json({ error: "Database not connected" });
+    const slug = String(req.params.slug || "").trim();
+    if (!slug) return res.status(400).json({ error: "Missing slug" });
+    const doc = await BlogPost.findOne({ slug, published: true }).lean();
+    if (!doc) return res.status(404).json({ error: "Not found" });
+    res.json({
+      ...doc,
+      id: doc._id?.toString(),
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get("/api/admin/blog-posts", maybeRequireAdmin, async (req, res) => {
+  try {
+    if (!dbConnected()) return res.status(503).json({ error: "Database not connected" });
+    const list = await BlogPost.find({}).sort({ updatedAt: -1 }).lean();
+    res.json(list.map((row) => blogPostToJson(row)));
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get("/api/admin/blog-posts/:id", maybeRequireAdmin, async (req, res) => {
+  try {
+    if (!dbConnected()) return res.status(503).json({ error: "Database not connected" });
+    const doc = await BlogPost.findById(req.params.id);
+    if (!doc) return res.status(404).json({ error: "Not found" });
+    res.json(blogPostToJson(doc));
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post("/api/admin/blog-posts", maybeRequireAdmin, async (req, res) => {
+  try {
+    if (!dbConnected()) return res.status(503).json({ error: "Database not connected" });
+    const body = req.body || {};
+    const title = body.title != null ? String(body.title).trim() : "";
+    if (!title) return res.status(400).json({ error: "title required" });
+    const slugSource = body.slug != null && String(body.slug).trim() ? String(body.slug).trim() : title;
+    const slug = await ensureUniqueBlogSlug(slugSource);
+    const published = Boolean(body.published);
+    const publishedAt =
+      published ? (body.publishedAt ? new Date(body.publishedAt) : new Date()) : undefined;
+    const doc = await BlogPost.create({
+      title,
+      slug,
+      excerpt: body.excerpt != null ? String(body.excerpt) : "",
+      contentHtml: body.contentHtml != null ? String(body.contentHtml) : "",
+      published,
+      publishedAt,
+      metaTitle: body.metaTitle != null ? String(body.metaTitle) : "",
+      metaDescription: body.metaDescription != null ? String(body.metaDescription) : "",
+    });
+    res.status(201).json(blogPostToJson(doc));
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.put("/api/admin/blog-posts/:id", maybeRequireAdmin, async (req, res) => {
+  try {
+    if (!dbConnected()) return res.status(503).json({ error: "Database not connected" });
+    const doc = await BlogPost.findById(req.params.id);
+    if (!doc) return res.status(404).json({ error: "Not found" });
+    const body = req.body || {};
+    if (body.title !== undefined) doc.title = String(body.title).trim();
+    if (body.excerpt !== undefined) doc.excerpt = String(body.excerpt);
+    if (body.contentHtml !== undefined) doc.contentHtml = String(body.contentHtml);
+    if (body.metaTitle !== undefined) doc.metaTitle = String(body.metaTitle);
+    if (body.metaDescription !== undefined) doc.metaDescription = String(body.metaDescription);
+    if (body.slug !== undefined) {
+      const next = await ensureUniqueBlogSlug(String(body.slug).trim() || doc.title, doc._id);
+      doc.slug = next;
+    }
+    if (body.published !== undefined) {
+      const nextPub = Boolean(body.published);
+      doc.published = nextPub;
+      if (nextPub && !doc.publishedAt) doc.publishedAt = new Date();
+      if (!nextPub) doc.publishedAt = undefined;
+    }
+    if (body.publishedAt !== undefined && doc.published) {
+      doc.publishedAt = body.publishedAt ? new Date(body.publishedAt) : new Date();
+    }
+    await doc.save();
+    res.json(blogPostToJson(doc));
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.delete("/api/admin/blog-posts/:id", maybeRequireAdmin, async (req, res) => {
+  try {
+    if (!dbConnected()) return res.status(503).json({ error: "Database not connected" });
+    const deleted = await BlogPost.findByIdAndDelete(req.params.id);
+    if (!deleted) return res.status(404).json({ error: "Not found" });
+    res.status(204).send();
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+/** Upsert the four legacy featured blogs (same slugs as storefront routes) so /api/blog/posts lists them. */
+app.post("/api/admin/blog-posts/seed-featured", maybeRequireAdmin, async (req, res) => {
+  try {
+    if (!dbConnected()) return res.status(503).json({ error: "Database not connected" });
+    if (String(req.body?.confirm || "").trim() !== "seed-featured-blogs") {
+      return res.status(400).json({
+        error: 'Send JSON: { "confirm": "seed-featured-blogs" }',
+      });
+    }
+    const now = new Date();
+    let count = 0;
+    for (const row of FEATURED_BLOG_SEEDS) {
+      await BlogPost.findOneAndUpdate(
+        { slug: row.slug },
+        {
+          $set: {
+            slug: row.slug,
+            title: row.title,
+            excerpt: row.excerpt,
+            contentHtml: seedContentHtml(row.excerpt),
+            published: true,
+            publishedAt: now,
+            metaTitle: row.title,
+            metaDescription: row.excerpt,
+          },
+        },
+        { upsert: true, new: true }
+      );
+      count += 1;
+    }
+    res.json({ ok: true, seeded: count });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // ---------- Admin auth (no auth middleware) — after other /api/admin/* so those routes match first ----------
 app.use("/api/admin", adminAuthRouter);
 
@@ -1492,6 +1696,46 @@ app.get("/api/health", (req, res) => {
 
 // Register uploads + static SPA only after all /api routes so DELETE/PUT/POST handlers always match.
 registerUploadsRouter(app);
+
+/** robots.txt / sitemap.xml: Vite emits these into frontend `dist`, but the API often serves from `cwd`/dist only — explicit lookup avoids SPA fallback returning HTML. Optional: PUBLIC_SEO_DIR=absolute/path/to/folder containing both files. */
+function seoFileCandidateDirs() {
+  const extra = process.env.PUBLIC_SEO_DIR && String(process.env.PUBLIC_SEO_DIR).trim();
+  const base = [
+    extra || null,
+    path.join(process.cwd(), "dist"),
+    path.join(__dirname, "..", "sports-cards-frontend", "dist"),
+    path.join(__dirname, "..", "sports-cards-frontend", "public"),
+    path.join(process.cwd(), "..", "sports-cards-frontend", "dist"),
+    path.join(process.cwd(), "..", "sports-cards-frontend", "public"),
+  ].filter(Boolean);
+  return [...new Set(base)];
+}
+
+async function sendSeoPublicFile(res, filename, contentType) {
+  for (const dir of seoFileCandidateDirs()) {
+    const fp = path.join(dir, filename);
+    try {
+      await fs.access(fp);
+      const buf = await fs.readFile(fp);
+      res.setHeader("Content-Type", contentType);
+      res.setHeader("Cache-Control", "public, max-age=3600");
+      return res.status(200).send(buf);
+    } catch {
+      /* try next */
+    }
+  }
+  return false;
+}
+
+app.get("/robots.txt", async (req, res) => {
+  const ok = await sendSeoPublicFile(res, "robots.txt", "text/plain; charset=utf-8");
+  if (!ok) res.status(404).type("text/plain").send("robots.txt not found on server");
+});
+
+app.get("/sitemap.xml", async (req, res) => {
+  const ok = await sendSeoPublicFile(res, "sitemap.xml", "application/xml; charset=utf-8");
+  if (!ok) res.status(404).type("text/plain").send("sitemap.xml not found on server");
+});
 
 // Serve built frontend (dist) so the app loads when opening the server URL (e.g. after npm run build).
 const distDir = path.join(process.cwd(), "dist");
