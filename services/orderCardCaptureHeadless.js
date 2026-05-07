@@ -9,6 +9,51 @@ function captureJwtSecret() {
   return String(process.env.ORDER_CARD_PDF_JWT_SECRET || process.env.JWT_SECRET || "").trim();
 }
 
+function getExportDpi() {
+  const parsed = Number(process.env.ORDER_CARD_EXPORT_DPI || 300);
+  if (!Number.isFinite(parsed)) return 300;
+  const clamped = Math.round(parsed);
+  return Math.min(65535, Math.max(1, clamped));
+}
+
+/**
+ * Set JPEG JFIF density metadata without changing pixel dimensions.
+ * This keeps image size the same while updating print DPI hints.
+ * @param {Buffer} jpeg
+ * @param {number} dpi
+ * @returns {Buffer}
+ */
+function withJpegDpi(jpeg, dpi) {
+  if (!Buffer.isBuffer(jpeg) || jpeg.length < 4) return jpeg;
+  if (jpeg[0] !== 0xff || jpeg[1] !== 0xd8) return jpeg; // not JPEG SOI
+  const out = Buffer.from(jpeg);
+  let offset = 2;
+  while (offset + 4 <= out.length) {
+    if (out[offset] !== 0xff) break;
+    const marker = out[offset + 1];
+    if (marker === 0xda || marker === 0xd9) break; // SOS / EOI
+    const segLen = out.readUInt16BE(offset + 2);
+    if (segLen < 2 || offset + 2 + segLen > out.length) break;
+    if (marker === 0xe0 && segLen >= 14) {
+      const idStart = offset + 4;
+      const hasJfif =
+        out[idStart] === 0x4a && // J
+        out[idStart + 1] === 0x46 && // F
+        out[idStart + 2] === 0x49 && // I
+        out[idStart + 3] === 0x46 && // F
+        out[idStart + 4] === 0x00; // \0
+      if (hasJfif) {
+        out[idStart + 7] = 0x01; // units: dpi
+        out.writeUInt16BE(dpi, idStart + 8); // X density
+        out.writeUInt16BE(dpi, idStart + 10); // Y density
+      }
+      return out;
+    }
+    offset += 2 + segLen;
+  }
+  return out;
+}
+
 /** Short-lived JWT for Puppeteer worker (same secret family as order-card-pdf). */
 export function signOrderCardCaptureToken(orderId) {
   const secret = captureJwtSecret();
@@ -62,6 +107,7 @@ export async function collectOrderCardCaptureJpegEntries(order) {
 
   const gotoMs = Math.max(30000, Number(process.env.ORDER_CARD_CAPTURE_GOTO_TIMEOUT_MS || 120000));
   const waitFnMs = Math.max(45000, Number(process.env.ORDER_CARD_CAPTURE_WAIT_TIMEOUT_MS || 180000));
+  const exportDpi = getExportDpi();
   const ref = getOrderRef(order);
   const filenameBase = `order-${ref}`;
 
@@ -153,9 +199,10 @@ export async function collectOrderCardCaptureJpegEntries(order) {
         const handle = await page.$("#pdf-export-card");
         if (!handle) throw new Error("Card surface #pdf-export-card not found");
         const jpegBuf = await handle.screenshot({ type: "jpeg", quality: 92 });
+        const jpegWithDpi = withJpegDpi(Buffer.from(jpegBuf), exportDpi);
         const name = `${filenameBase}${suffix}-${side}.jpg`;
-        entries.push({ name, buffer: Buffer.from(jpegBuf) });
-        console.info("[orderCardCaptureHeadless] shot ok", name, jpegBuf?.length ?? 0, "bytes");
+        entries.push({ name, buffer: jpegWithDpi });
+        console.info("[orderCardCaptureHeadless] shot ok", name, jpegWithDpi?.length ?? 0, "bytes", `dpi=${exportDpi}`);
       }
     }
     await page.close().catch(() => {});

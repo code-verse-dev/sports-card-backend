@@ -581,6 +581,25 @@ app.get("/api/orders/internal/order-items-for-capture", async (req, res) => {
     const order = await Order.findById(payload.orderId).select("items").lean();
     if (!order) return res.status(404).json({ error: "Order not found" });
     const { captureItemRows } = filterDesignedItemsForCardCapture(order.items || []);
+    try {
+      const debugRows = captureItemRows.map((r, idx) => {
+        const snap = r?.item?.designSnapshot && typeof r.item.designSnapshot === "object" ? r.item.designSnapshot : {};
+        const keys = Object.keys(snap || {});
+        const backImageKeys = keys.filter((k) => /^back[_-]?image[_-]?\d+$/i.test(k) || /back.*image/i.test(k));
+        return {
+          lineIndex: idx,
+          templateId: r?.item?.templateId,
+          keyCount: keys.length,
+          backImageKeys,
+        };
+      });
+      console.info("[order-items-for-capture] debug", {
+        orderId: String(payload.orderId),
+        rows: debugRows,
+      });
+    } catch (e) {
+      console.warn("[order-items-for-capture] debug logging failed:", e?.message || e);
+    }
     res.json({ captureItemRows });
   } catch (e) {
     res.status(500).json({ error: e.message });
