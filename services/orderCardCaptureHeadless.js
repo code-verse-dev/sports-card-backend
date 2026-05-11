@@ -127,15 +127,52 @@ export async function collectOrderCardCaptureJpegEntries(order) {
       /NotSameOrigin|blocked.*response|ORB|ERR_BLOCKED/i.test(String(errText || ""));
 
     let noisyFontSkipLogged = false;
+    /**
+     * Puppeteer's msg.text() stringifies object args as "JSHandle@object" / "[object Object]",
+     * which hides the structured payload of e.g. `[card-preview] image load failed {fieldId,...}`.
+     * Unwrap each arg with jsonValue() so the real diagnostic data shows up in our server logs.
+     */
+    const safeStringifyArg = async (arg) => {
+      try {
+        const v = await arg.jsonValue();
+        if (v === undefined) return "undefined";
+        if (v === null) return "null";
+        if (typeof v === "string") return v;
+        if (typeof v === "number" || typeof v === "boolean") return String(v);
+        try {
+          return JSON.stringify(v);
+        } catch {
+          return String(v);
+        }
+      } catch {
+        return null;
+      }
+    };
     page.on("console", (msg) => {
       const t = msg.text();
       const ty = msg.type();
       if (ty === "error" && /Failed to load resource/i.test(t) && /fonts\.cdnfonts\.com|fonts\.googleapis\.com/i.test(t)) {
         return;
       }
-      if (ty === "error" || ty === "warn" || t.includes("[order-card-capture]")) {
-        console.info("[orderCardCaptureHeadless] page console:", ty, t.slice(0, 800));
+      if (!(ty === "error" || ty === "warn" || t.includes("[order-card-capture]") || t.includes("[card-preview]"))) {
+        return;
       }
+      (async () => {
+        let serialized = t;
+        try {
+          const args = msg.args();
+          if (args && args.length > 0) {
+            const parts = await Promise.all(args.map(safeStringifyArg));
+            const expanded = parts.filter((p) => p !== null).join(" ");
+            if (expanded) serialized = expanded;
+          }
+        } catch {
+          /* fall back to msg.text() */
+        }
+        console.info("[orderCardCaptureHeadless] page console:", ty, serialized.slice(0, 1500));
+      })().catch(() => {
+        console.info("[orderCardCaptureHeadless] page console:", ty, t.slice(0, 800));
+      });
     });
     page.on("pageerror", (err) => {
       console.error("[orderCardCaptureHeadless] pageerror:", err?.message || err);
