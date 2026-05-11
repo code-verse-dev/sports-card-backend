@@ -251,8 +251,6 @@ function customerMayAccessOrder(user, orderLean) {
 
 /** Status that lets the customer edit their order's design without paying. Set by admin via status change. */
 const DESIGN_FIX_STATUS = "request_review";
-/** After the customer submits their edits, the order returns to this status so admin can re-review. */
-const DESIGN_FIX_RESOLVED_STATUS = "confirmed";
 
 /** GET /api/user/orders/:orderId — one order (for fix-design flow). */
 router.get("/orders/:orderId", requireCustomer, async (req, res) => {
@@ -388,11 +386,15 @@ router.patch("/orders/:orderId/design-fix", requireCustomer, async (req, res) =>
       });
     }
 
-    /** Submission auto-restores status (admin can re-review) and clears any legacy fix-request flags. */
+    /**
+     * Stay in `request_review` until the admin manually moves the order forward — they need
+     * to look at the customer's resubmission before greenlighting production. We just stamp
+     * `designFixLastSubmittedAt` so the admin sees when the latest update came in, and clear
+     * the legacy fix-request flags that were used pre-status-driven workflow.
+     */
     await Order.findByIdAndUpdate(oid, {
       $set: {
         items,
-        status: DESIGN_FIX_RESOLVED_STATUS,
         designFixLastSubmittedAt: new Date(),
         designFixRequestedAt: null,
         designFixNote: null,
