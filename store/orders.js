@@ -7,6 +7,7 @@ export const ORDER_STATUSES = [
   "pending_payment",
   "payment_failed",
   "confirmed",
+  "request_review",
   "in_production",
   "shipped",
   "delivered",

@@ -487,3 +487,42 @@ export async function sendTrackingInfoCustomerEmail(order) {
     text: `Order #${ref} tracking: ${num}. ${trackUrl || ""} ${myAccountUrl()}`,
   });
 }
+
+function myAccountOrdersTabUrl() {
+  const base = myAccountUrl();
+  return base.includes("?") ? `${base}&tab=orders` : `${base}?tab=orders`;
+}
+
+/**
+ * Customer email: admin asked them to update design images (no extra payment).
+ * Only for orders with a linked {@link Order#customerId} account.
+ * @param {import('mongoose').Document | object} order — populated customerId ok
+ */
+export async function sendDesignFixRequestedCustomerEmail(order) {
+  if (!isMailConfigured()) {
+    console.warn("[orderEmails] SMTP not configured — design-fix email skipped");
+    return;
+  }
+  const email = getOrderCustomerView(order).email?.trim();
+  if (!email) return;
+  const ref = getOrderRef(order);
+  const id = order._id?.toString?.() || order.id;
+  const base = getPublicAppBase();
+  const fixPath = id ? `/my-account/orders/${encodeURIComponent(id)}/fix-design` : "/my-account";
+  const fixHref = base ? `${base.replace(/\/$/, "")}${fixPath}` : fixPath;
+  const preheader = `Action needed: update images for order #${ref}`;
+  const bodyHtml = `
+    <p style="margin:0 0 16px;font-size:17px;color:#0f172a;font-weight:600;">Hi ${esc(customerName(order))},</p>
+    <p style="margin:0 0 20px;">We need you to <strong>replace or re-upload images</strong> for your order so we can print it correctly. You will <strong>not be charged again</strong>.</p>
+    <p style="margin:0 0 20px;font-size:14px;color:#475569;">Open <strong>My Account → Orders</strong>, find this order, and use the prompts there to upload your files.</p>
+    ${emailButton(fixHref, "Update my design")}
+    <p style="margin:24px 0 0;font-size:13px;color:#64748b;">Order reference: <strong style="color:#0f172a;">#${esc(ref)}</strong></p>
+    ${emailButton(myAccountOrdersTabUrl(), "View all orders")}
+  `;
+  await sendMailMessage({
+    to: email,
+    subject: `Action needed — please update images for order #${ref}`,
+    html: wrapEmailHtml({ preheader, bodyHtml }),
+    text: `We need updated images for order #${ref}. No extra charge. Update here: ${fixHref} Or open orders: ${myAccountOrdersTabUrl()}`,
+  });
+}
