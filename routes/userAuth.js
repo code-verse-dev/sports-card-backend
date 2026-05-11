@@ -388,19 +388,24 @@ router.patch("/orders/:orderId/design-fix", requireCustomer, async (req, res) =>
 
     /**
      * Stay in `request_review` until the admin manually moves the order forward — they need
-     * to look at the customer's resubmission before greenlighting production. We just stamp
-     * `designFixLastSubmittedAt` so the admin sees when the latest update came in, and clear
-     * the legacy fix-request flags that were used pre-status-driven workflow.
+     * to look at the customer's resubmission before greenlighting production. Explicitly set
+     * `status` here so nothing else can leave the row appearing as `confirmed` after a save.
+     * Stamp `designFixLastSubmittedAt` for admin visibility; clear legacy fix-request flags.
      */
-    await Order.findByIdAndUpdate(oid, {
-      $set: {
-        items,
-        designFixLastSubmittedAt: new Date(),
-        designFixRequestedAt: null,
-        designFixNote: null,
+    const fresh = await Order.findByIdAndUpdate(
+      oid,
+      {
+        $set: {
+          items,
+          status: DESIGN_FIX_STATUS,
+          designFixLastSubmittedAt: new Date(),
+          designFixRequestedAt: null,
+          designFixNote: null,
+        },
       },
-    });
-    const fresh = await Order.findById(oid).lean();
+      { new: true, lean: true }
+    );
+    if (!fresh) return res.status(404).json({ error: "Order not found" });
     res.json({ ...fresh, id: fresh._id?.toString() });
   } catch (e) {
     console.error("[orders] PATCH /api/user/orders/:orderId/design-fix failed:", e?.message || e);
