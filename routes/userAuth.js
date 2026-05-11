@@ -332,7 +332,17 @@ router.patch("/orders/:orderId/design-fix", requireCustomer, async (req, res) =>
       row.designSnapshot && typeof row.designSnapshot === "object" && !Array.isArray(row.designSnapshot)
         ? { ...row.designSnapshot }
         : {};
-    row.designSnapshot = { ...prevSnap, ...patch };
+    const merged = { ...prevSnap, ...patch };
+    /**
+     * Legacy orders (pre-eager-upload) may still carry `__inline_image_ref__:…` placeholders
+     * whose underlying bytes lived in the customer's sessionStorage and are now gone forever.
+     * Drop them so they don't trip the placeholder validation below. The customer's re-upload
+     * (when they actually pick a new image) lands in `patch` and overwrites these slots.
+     */
+    for (const [k, v] of Object.entries(merged)) {
+      if (typeof v === "string" && v.startsWith("__inline_image_ref__:")) merged[k] = "";
+    }
+    row.designSnapshot = merged;
     if (fontPatchProvided) {
       const prevFontOverrides =
         row.designFontOverrides && typeof row.designFontOverrides === "object" && !Array.isArray(row.designFontOverrides)
