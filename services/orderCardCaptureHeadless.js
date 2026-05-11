@@ -1,5 +1,6 @@
 import jwt from "jsonwebtoken";
 import archiver from "archiver";
+import { finished } from "node:stream/promises";
 import { getOrderRef } from "./publicCodes.js";
 import { filterDesignedItemsForCardCapture } from "./orderCardPdfExportMeta.js";
 import { getPuppeteerLaunchOptions } from "./puppeteerLaunchConfig.js";
@@ -257,19 +258,25 @@ export async function collectOrderCardCaptureJpegEntries(order) {
  */
 export async function buildOrderCardImagesZipHeadless(order) {
   const collected = await collectOrderCardCaptureJpegEntries(order);
-  if (!collected) return null;
+  if (!collected?.entries?.length) return null;
 
   const { entries, filenameBase } = collected;
   const archive = archiver("zip", { zlib: { level: 6 } });
-  const buffer = await new Promise((resolve, reject) => {
-    const chunks = [];
-    archive.on("data", (d) => chunks.push(d));
-    archive.on("end", () => resolve(Buffer.concat(chunks)));
-    archive.on("error", reject);
-    for (const { name, buffer: b } of entries) {
-      archive.append(b, { name });
+  const chunks = [];
+  archive.on("data", (d) => chunks.push(d));
+
+  for (const { name, buffer: b } of entries) {
+    if (!name || typeof name !== "string") {
+      throw new Error(`card-images.zip: invalid entry name (${String(name)})`);
     }
-    void archive.finalize();
-  });
+    if (!Buffer.isBuffer(b) || b.length === 0) {
+      throw new Error(`card-images.zip: empty or missing JPEG for ${name}`);
+    }
+    archive.append(b, { name });
+  }
+
+  /** Archiver 7 `finalize()` returns a Promise; awaiting avoids unhandled rejections. `finished` waits for all `data` + stream `end`. */
+  await Promise.all([finished(archive), archive.finalize()]);
+  const buffer = Buffer.concat(chunks);
   return { buffer, filenameBase };
 }
