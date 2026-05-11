@@ -332,17 +332,7 @@ router.patch("/orders/:orderId/design-fix", requireCustomer, async (req, res) =>
       row.designSnapshot && typeof row.designSnapshot === "object" && !Array.isArray(row.designSnapshot)
         ? { ...row.designSnapshot }
         : {};
-    const merged = { ...prevSnap, ...patch };
-    /**
-     * Legacy orders (pre-eager-upload) may still carry `__inline_image_ref__:…` placeholders
-     * whose underlying bytes lived in the customer's sessionStorage and are now gone forever.
-     * Drop them so they don't trip the placeholder validation below. The customer's re-upload
-     * (when they actually pick a new image) lands in `patch` and overwrites these slots.
-     */
-    for (const [k, v] of Object.entries(merged)) {
-      if (typeof v === "string" && v.startsWith("__inline_image_ref__:")) merged[k] = "";
-    }
-    row.designSnapshot = merged;
+    row.designSnapshot = { ...prevSnap, ...patch };
     if (fontPatchProvided) {
       const prevFontOverrides =
         row.designFontOverrides && typeof row.designFontOverrides === "object" && !Array.isArray(row.designFontOverrides)
@@ -366,6 +356,21 @@ router.patch("/orders/:orderId/design-fix", requireCustomer, async (req, res) =>
       row.designFontOverrides = { ...prevFontOverrides, ...cleanedFontOverrides };
     }
     items[idx] = row;
+
+    /**
+     * Legacy orders (pre-eager-upload) carry `__inline_image_ref__:…` placeholders whose
+     * underlying bytes lived in the customer's sessionStorage and are long gone. Walk every
+     * line item's snapshot and drop them so they don't fail the placeholder validation below.
+     * Only the line the customer is editing has fresh values to apply; for any other line we
+     * just clean up the dead reference (its image stays empty until someone re-uploads).
+     */
+    for (const it of items) {
+      const snap = it && typeof it === "object" ? it.designSnapshot : null;
+      if (!snap || typeof snap !== "object" || Array.isArray(snap)) continue;
+      for (const [k, v] of Object.entries(snap)) {
+        if (typeof v === "string" && v.startsWith("__inline_image_ref__:")) snap[k] = "";
+      }
+    }
 
     try {
       await materializeInlineSnapshotsInItems(items);
