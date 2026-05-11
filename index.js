@@ -4,6 +4,7 @@ import { fileURLToPath } from "url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
+import http from "http";
 import express from "express";
 import cors from "cors";
 import jwt from "jsonwebtoken";
@@ -46,6 +47,7 @@ import {
   sendTrackingInfoCustomerEmail,
   sendDesignFixRequestedCustomerEmail,
 } from "./services/orderEmails.js";
+import { initAdminSocket } from "./services/adminSocketHub.js";
 import { getOrderCustomerView } from "./services/orderCustomer.js";
 import {
   filterItemsForAdminEmailCardPdf,
@@ -1291,12 +1293,10 @@ app.patch("/api/admin/orders/:id", maybeRequireAdmin, async (req, res) => {
 
       if (prev.status !== order.status) {
         if (order.status === "request_review") {
-          /** Status-driven review-request workflow: emails the customer with the edit link. */
-          /** TEMP: review-request email disabled while QA-ing the flow. Re-enable when ready. */
-          // sendDesignFixRequestedCustomerEmail(order).catch((err) =>
-          //   console.error("[admin] request-review email:", err?.message || err)
-          // );
-          console.log(`[admin] request-review email suppressed (QA mode) orderId=${req.params.id}`);
+          /** Status-driven review-request workflow: email the customer with links to update their design. */
+          sendDesignFixRequestedCustomerEmail(order).catch((err) =>
+            console.error("[admin] request-review customer email:", err?.message || err)
+          );
         } else {
           sendOrderStatusChangedCustomerEmail(order, prev.status).catch((err) =>
             console.error("[admin] status email:", err?.message || err)
@@ -2090,7 +2090,9 @@ async function seedAdminIfNeeded() {
   } catch (err) {
     console.error("DB connect failed:", err.message);
   }
-  app.listen(PORT, HOST, () => {
+  const server = http.createServer(app);
+  initAdminSocket(server);
+  server.listen(PORT, HOST, () => {
     console.log(`Server running at http://${HOST}:${PORT}`);
   });
 })();

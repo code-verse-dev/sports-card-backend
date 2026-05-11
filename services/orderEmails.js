@@ -526,3 +526,53 @@ export async function sendDesignFixRequestedCustomerEmail(order) {
     text: `We need updated images for order #${ref}. No extra charge. Update here: ${fixHref} Or open orders: ${myAccountOrdersTabUrl()}`,
   });
 }
+
+/**
+ * Admin notification: customer saved design changes while the order was in `request_review`.
+ * Order stays in request review until staff changes status manually.
+ * @param {import('mongoose').Document | object} order — lean/doc with _id, customer, orderCode, status
+ */
+export async function sendDesignReviewSubmittedAdminEmail(order) {
+  if (!isMailConfigured()) {
+    console.warn("[orderEmails] SMTP not configured — design-review-submitted admin email skipped");
+    return;
+  }
+  const admins = getAdminNotificationEmails();
+  if (admins.length === 0) {
+    console.warn("[orderEmails] ADMIN_EMAIL / ADMIN_NOTIFICATION_EMAILS not set — skipping design-review-submitted notification");
+    return;
+  }
+  const ref = getOrderRef(order);
+  const id = order._id?.toString?.() || order.id || "";
+  const cView = getOrderCustomerView(order);
+  const brand = getMailBrandName();
+  const accent = getMailAccentColor();
+  const adminListUrl = getAdminOrdersUrl();
+  const adminOrderUrl =
+    adminListUrl && id ? `${adminListUrl.replace(/\/$/, "")}/${encodeURIComponent(id)}` : "";
+  const preheader = `Customer updated design for order #${ref}`;
+  const openBtn = adminOrderUrl
+    ? emailButton(adminOrderUrl, "Open this order in admin")
+    : adminListUrl
+      ? emailButton(adminListUrl, "Open orders in admin")
+      : "";
+  const bodyHtml = `
+    <p style="margin:0 0 8px;font-size:13px;font-weight:600;letter-spacing:0.06em;text-transform:uppercase;color:#94a3b8;">Design review</p>
+    <p style="margin:0 0 16px;font-size:20px;font-weight:700;color:#0f172a;">Customer completed review — order <span style="color:${esc(accent)};">#${esc(ref)}</span></p>
+    <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.55;">They submitted updated images or text. The order remains in <strong>request review</strong> until you verify the design and change the status.</p>
+    <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 20px;width:100%;background:#f8fafc;border-radius:12px;border:1px solid #e2e8f0;">
+      <tr><td style="padding:16px 18px;font-family:Segoe UI,Roboto,Helvetica,Arial,sans-serif;font-size:14px;">
+        <strong style="color:#64748b;display:block;margin-bottom:6px;">Customer</strong>
+        ${esc(cView.email || "—")}<br/>
+        <span style="color:#334155;">${esc([cView.firstName, cView.lastName].filter(Boolean).join(" ") || "—")}</span>
+      </td></tr>
+    </table>
+    ${openBtn}
+  `;
+  await sendMailMessage({
+    to: admins,
+    subject: `[${brand}] Customer completed design review — order #${ref}`,
+    html: wrapEmailHtml({ preheader, bodyHtml }),
+    text: `Customer submitted design updates for order #${ref} (${id}). ${cView.email || ""}. Order remains "request review". ${adminOrderUrl || adminListUrl || ""}`,
+  });
+}

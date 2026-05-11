@@ -11,6 +11,8 @@ import {
   hasInlineImageDataUrlInItems,
   hasInlineImageRefPlaceholderInItems,
 } from "../services/orderSnapshotValidation.js";
+import { sendDesignReviewSubmittedAdminEmail } from "../services/orderEmails.js";
+import { emitAdminNotification } from "../services/adminSocketHub.js";
 
 const router = Router();
 
@@ -406,6 +408,15 @@ router.patch("/orders/:orderId/design-fix", requireCustomer, async (req, res) =>
       { new: true, lean: true }
     );
     if (!fresh) return res.status(404).json({ error: "Order not found" });
+    sendDesignReviewSubmittedAdminEmail(fresh).catch((err) =>
+      console.error("[orders] design-review-submitted admin email:", err?.message || err)
+    );
+    emitAdminNotification({
+      kind: "design_review_submitted",
+      orderId: fresh._id?.toString(),
+      orderCode: fresh.orderCode ? String(fresh.orderCode) : undefined,
+      status: fresh.status,
+    });
     res.json({ ...fresh, id: fresh._id?.toString() });
   } catch (e) {
     console.error("[orders] PATCH /api/user/orders/:orderId/design-fix failed:", e?.message || e);
