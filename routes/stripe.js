@@ -33,6 +33,10 @@ import {
   allocateDiscountAcrossItems,
 } from "../services/cartDiscounts.js";
 import { materializeInlineSnapshotsInItems } from "../services/checkoutSnapshotMaterialize.js";
+import {
+  hasInlineImageDataUrlInItems,
+  hasInlineImageRefPlaceholderInItems,
+} from "../services/orderSnapshotValidation.js";
 
 const router = Router();
 const stripe = process.env.STRIPE_SECRET_KEY ? new Stripe(process.env.STRIPE_SECRET_KEY, { apiVersion: "2024-11-20.acacia" }) : null;
@@ -71,34 +75,15 @@ function estimateJsonBytes(value) {
   }
 }
 
-function isInlineImageDataUrlString(s) {
-  if (typeof s !== "string") return false;
-  const t = s.trim();
-  return t.startsWith("data:image/") && t.includes(";base64,");
-}
-
-function valueHasInlineImageDataUrl(value) {
-  if (isInlineImageDataUrlString(value)) return true;
-  if (value && typeof value === "object") {
-    if (Array.isArray(value)) return value.some((v) => valueHasInlineImageDataUrl(v));
-    return Object.values(value).some((v) => valueHasInlineImageDataUrl(v));
-  }
-  return false;
-}
-
-function hasInlineImageDataUrlInItems(items) {
-  if (!Array.isArray(items)) return false;
-  for (const item of items) {
-    if (valueHasInlineImageDataUrl(item?.designSnapshot)) return true;
-  }
-  return false;
-}
-
 function validateCheckoutItemsPayload(items) {
   if (!Array.isArray(items) || items.length === 0) return "items (non-empty array) required";
   if (items.length > 250) return "Too many line items in checkout payload.";
   if (hasInlineImageDataUrlInItems(items)) {
     return "Checkout is still preparing design images. Please wait a moment and try again.";
+  }
+  if (hasInlineImageRefPlaceholderInItems(items)) {
+    /** Cart sidecar lost real image data — placeholder would persist as the design and break capture. */
+    return "Your design images are no longer in this browser session. Please re-open your design from your cart and confirm the images, then try checkout again.";
   }
   const bytes = estimateJsonBytes(items);
   if (!Number.isFinite(bytes) || bytes > 8 * 1024 * 1024) {

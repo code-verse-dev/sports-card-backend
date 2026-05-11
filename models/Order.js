@@ -24,7 +24,17 @@ const orderSchema = new mongoose.Schema(
       type: String,
       required: true,
       default: "pending",
-      enum: ["pending", "pending_payment", "payment_failed", "confirmed", "in_production", "shipped", "delivered", "cancelled"],
+      enum: [
+        "pending",
+        "pending_payment",
+        "payment_failed",
+        "confirmed",
+        "request_review",
+        "in_production",
+        "shipped",
+        "delivered",
+        "cancelled",
+      ],
     },
     stripeSessionId: { type: String, sparse: true },
     /** stripe | paypal | manual — how the customer paid (or bypass). */
@@ -67,6 +77,12 @@ const orderSchema = new mongoose.Schema(
     trackingNumber: { type: String, trim: true },
     /** Optional full tracking URL; if empty, UPS URL is derived from trackingNumber when carrier is UPS. */
     trackingUrl: { type: String, trim: true },
+    /** When set, the customer may update design images on a paid order without paying again. */
+    designFixRequestedAt: { type: Date, default: null },
+    /** Admin instructions shown on the customer fix-design page. */
+    designFixNote: { type: String, trim: true },
+    /** Set when the customer submits changes via /api/user/orders/:id/design-fix. */
+    designFixLastSubmittedAt: { type: Date, default: null },
   },
   { timestamps: true }
 );

@@ -41,7 +41,11 @@ import { FEATURED_BLOG_SEEDS, seedContentHtml } from "./data/featured-blog-seeds
 import { getPriceConfig, setPriceConfig } from "./models/PriceConfig.js";
 import { AdminUser, hashPassword } from "./models/AdminUser.js";
 import { CustomerUser, hashCustomerPassword } from "./models/CustomerUser.js";
-import { sendOrderStatusChangedCustomerEmail, sendTrackingInfoCustomerEmail } from "./services/orderEmails.js";
+import {
+  sendOrderStatusChangedCustomerEmail,
+  sendTrackingInfoCustomerEmail,
+  sendDesignFixRequestedCustomerEmail,
+} from "./services/orderEmails.js";
 import { getOrderCustomerView } from "./services/orderCustomer.js";
 import {
   filterItemsForAdminEmailCardPdf,
@@ -140,6 +144,9 @@ function orderToJson(doc) {
     trackingCarrier: o.trackingCarrier,
     trackingNumber: o.trackingNumber,
     trackingUrl: o.trackingUrl,
+    designFixRequestedAt: o.designFixRequestedAt || undefined,
+    designFixNote: o.designFixNote || undefined,
+    designFixLastSubmittedAt: o.designFixLastSubmittedAt || undefined,
   };
 }
 
@@ -1202,15 +1209,76 @@ app.patch("/api/admin/orders/:id", maybeRequireAdmin, async (req, res) => {
   try {
     if (dbConnected()) {
       const body = req.body || {};
-      const allowed = ["status", "notes", "trackingNumber", "trackingCarrier", "trackingUrl"];
+      const allowed = [
+        "status",
+        "notes",
+        "trackingNumber",
+        "trackingCarrier",
+        "trackingUrl",
+        "customerId",
+        "designFixRequestedAt",
+        "designFixNote",
+        "designFixLastSubmittedAt",
+      ];
       const updates = {};
       for (const key of allowed) {
         if (body[key] !== undefined) updates[key] = body[key];
+      }
+      /** Resolve customerId: Mongo ObjectId string or explicit null to unlink. */
+      if (body.customerId !== undefined) {
+        const cid = body.customerId === null || body.customerId === "" ? null : String(body.customerId).trim();
+        if (!cid) {
+          updates.customerId = null;
+        } else if (!mongoose.Types.ObjectId.isValid(cid)) {
+          return res.status(400).json({ error: "Invalid customerId" });
+        } else {
+          const exists = await CustomerUser.exists({ _id: cid });
+          if (!exists) return res.status(404).json({ error: "Customer not found" });
+          updates.customerId = cid;
+        }
+      }
+      if (body.designFixRequestedAt !== undefined) {
+        if (body.designFixRequestedAt === null || body.designFixRequestedAt === "") {
+          updates.designFixRequestedAt = null;
+        } else {
+          const d = new Date(body.designFixRequestedAt);
+          if (Number.isNaN(d.getTime())) {
+            return res.status(400).json({ error: "Invalid designFixRequestedAt (use ISO date string or null)" });
+          }
+          updates.designFixRequestedAt = d;
+        }
+      }
+      if (body.designFixNote !== undefined) {
+        updates.designFixNote =
+          body.designFixNote === null || body.designFixNote === ""
+            ? null
+            : String(body.designFixNote).trim().slice(0, 4000);
+      }
+      if (body.designFixLastSubmittedAt !== undefined) {
+        if (body.designFixLastSubmittedAt === null || body.designFixLastSubmittedAt === "") {
+          updates.designFixLastSubmittedAt = null;
+        } else {
+          const d = new Date(body.designFixLastSubmittedAt);
+          if (Number.isNaN(d.getTime())) {
+            return res.status(400).json({ error: "Invalid designFixLastSubmittedAt" });
+          }
+          updates.designFixLastSubmittedAt = d;
+        }
       }
       const prev = await Order.findById(req.params.id);
       if (!prev) {
         console.warn(`[orders] PATCH /api/admin/orders/:id 404 id=${req.params.id}`);
         return res.status(404).json({ error: "Order not found" });
+      }
+      if (updates.designFixRequestedAt && body.designFixRequestedAt !== null && body.designFixRequestedAt !== "") {
+        const effectiveCustomerId =
+          updates.customerId !== undefined ? updates.customerId : prev.customerId;
+        if (!effectiveCustomerId) {
+          return res.status(400).json({
+            error:
+              "Design fix requires a linked customer account (customerId). Guest-only orders cannot receive this request.",
+          });
+        }
       }
       const order = await Order.findByIdAndUpdate(req.params.id, { $set: updates }, { new: true }).populate({
         path: "customerId",
@@ -1222,9 +1290,18 @@ app.patch("/api/admin/orders/:id", maybeRequireAdmin, async (req, res) => {
       }
 
       if (prev.status !== order.status) {
-        sendOrderStatusChangedCustomerEmail(order, prev.status).catch((err) =>
-          console.error("[admin] status email:", err?.message || err)
-        );
+        if (order.status === "request_review") {
+          /** Status-driven review-request workflow: emails the customer with the edit link. */
+          /** TEMP: review-request email disabled while QA-ing the flow. Re-enable when ready. */
+          // sendDesignFixRequestedCustomerEmail(order).catch((err) =>
+          //   console.error("[admin] request-review email:", err?.message || err)
+          // );
+          console.log(`[admin] request-review email suppressed (QA mode) orderId=${req.params.id}`);
+        } else {
+          sendOrderStatusChangedCustomerEmail(order, prev.status).catch((err) =>
+            console.error("[admin] status email:", err?.message || err)
+          );
+        }
       }
       const prevTrack = String(prev.trackingNumber || "").trim();
       const nextTrack = String(order.trackingNumber || "").trim();

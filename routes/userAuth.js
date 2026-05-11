@@ -6,6 +6,11 @@ import { signToken, requireCustomer } from "../middleware/auth.js";
 import { dbConnected } from "../db.js";
 import { Order } from "../models/Order.js";
 import { UserSavedDesign } from "../models/UserSavedDesign.js";
+import { materializeInlineSnapshotsInItems } from "../services/checkoutSnapshotMaterialize.js";
+import {
+  hasInlineImageDataUrlInItems,
+  hasInlineImageRefPlaceholderInItems,
+} from "../services/orderSnapshotValidation.js";
 
 const router = Router();
 
@@ -229,6 +234,133 @@ router.get("/orders", requireCustomer, async (req, res) => {
     res.json(withId);
   } catch (e) {
     console.error("[orders] GET /api/user/orders failed:", e?.message || e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+/** Whether this logged-in customer may see/update this order (linked account or same email as order snapshot). */
+function customerMayAccessOrder(user, orderLean) {
+  if (!user || !orderLean) return false;
+  const uid = user._id;
+  const cid = orderLean.customerId;
+  if (cid && uid && String(cid) === String(uid)) return true;
+  const ue = String(user.email || "").trim().toLowerCase();
+  const oe = String(orderLean.customer?.email || "").trim().toLowerCase();
+  return ue.length > 0 && oe.length > 0 && ue === oe;
+}
+
+/** Status that lets the customer edit their order's design without paying. Set by admin via status change. */
+const DESIGN_FIX_STATUS = "request_review";
+/** After the customer submits their edits, the order returns to this status so admin can re-review. */
+const DESIGN_FIX_RESOLVED_STATUS = "confirmed";
+
+/** GET /api/user/orders/:orderId — one order (for fix-design flow). */
+router.get("/orders/:orderId", requireCustomer, async (req, res) => {
+  try {
+    if (!dbConnected()) return res.status(503).json({ error: "Orders not available" });
+    const user = req.customerUser;
+    if (!user) return res.status(401).json({ error: "Unauthorized" });
+    const oid = String(req.params.orderId || "").trim();
+    if (!oid || !mongoose.Types.ObjectId.isValid(oid)) {
+      return res.status(400).json({ error: "Invalid order id" });
+    }
+    const order = await Order.findById(oid).lean();
+    if (!order) return res.status(404).json({ error: "Order not found" });
+    if (!customerMayAccessOrder(user, order)) return res.status(403).json({ error: "Forbidden" });
+    res.json({ ...order, id: order._id?.toString() });
+  } catch (e) {
+    console.error("[orders] GET /api/user/orders/:orderId failed:", e?.message || e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+/**
+ * PATCH /api/user/orders/:orderId/design-fix — merge image fields into one line's designSnapshot without payment.
+ * Requires admin-set designFixRequestedAt. Converts inline data URLs to uploads server-side.
+ */
+router.patch("/orders/:orderId/design-fix", requireCustomer, async (req, res) => {
+  try {
+    if (!dbConnected()) return res.status(503).json({ error: "Orders not available" });
+    const user = req.customerUser;
+    if (!user) return res.status(401).json({ error: "Unauthorized" });
+    const oid = String(req.params.orderId || "").trim();
+    if (!oid || !mongoose.Types.ObjectId.isValid(oid)) {
+      return res.status(400).json({ error: "Invalid order id" });
+    }
+    const { lineIndex, designSnapshotPatch } = req.body || {};
+    const idx = Number(lineIndex);
+    if (!Number.isInteger(idx) || idx < 0) {
+      return res.status(400).json({ error: "lineIndex must be a non-negative integer" });
+    }
+    if (!designSnapshotPatch || typeof designSnapshotPatch !== "object" || Array.isArray(designSnapshotPatch)) {
+      return res.status(400).json({ error: "designSnapshotPatch (object) required" });
+    }
+
+    const order = await Order.findById(oid);
+    if (!order) return res.status(404).json({ error: "Order not found" });
+    const lean = order.toObject ? order.toObject() : order;
+    if (!customerMayAccessOrder(user, lean)) return res.status(403).json({ error: "Forbidden" });
+    if (order.status !== DESIGN_FIX_STATUS) {
+      return res.status(400).json({
+        error:
+          "This order is not open for edits right now. It is only editable when our team sets the status to “request review.”",
+      });
+    }
+
+    const items = JSON.parse(JSON.stringify(Array.isArray(order.items) ? order.items : []));
+    if (idx >= items.length) {
+      return res.status(400).json({ error: "lineIndex out of range" });
+    }
+
+    const patch = {};
+    for (const [k, v] of Object.entries(designSnapshotPatch)) {
+      const key = String(k || "").trim();
+      if (!key || key.length > 160) continue;
+      if (typeof v !== "string") continue;
+      patch[key] = v.trim();
+    }
+    if (Object.keys(patch).length === 0) {
+      return res.status(400).json({ error: "designSnapshotPatch must include at least one string field value." });
+    }
+
+    const row = items[idx] && typeof items[idx] === "object" ? { ...items[idx] } : {};
+    const prevSnap =
+      row.designSnapshot && typeof row.designSnapshot === "object" && !Array.isArray(row.designSnapshot)
+        ? { ...row.designSnapshot }
+        : {};
+    row.designSnapshot = { ...prevSnap, ...patch };
+    items[idx] = row;
+
+    try {
+      await materializeInlineSnapshotsInItems(items);
+    } catch (e) {
+      return res.status(400).json({ error: String(e?.message || "Could not store uploaded images.") });
+    }
+    if (hasInlineImageRefPlaceholderInItems(items)) {
+      return res.status(400).json({
+        error: "Some image placeholders are invalid. Re-upload each photo or contact support.",
+      });
+    }
+    if (hasInlineImageDataUrlInItems(items)) {
+      return res.status(400).json({
+        error: "Images could not be saved on the server. Try again or use smaller files.",
+      });
+    }
+
+    /** Submission auto-restores status (admin can re-review) and clears any legacy fix-request flags. */
+    await Order.findByIdAndUpdate(oid, {
+      $set: {
+        items,
+        status: DESIGN_FIX_RESOLVED_STATUS,
+        designFixLastSubmittedAt: new Date(),
+        designFixRequestedAt: null,
+        designFixNote: null,
+      },
+    });
+    const fresh = await Order.findById(oid).lean();
+    res.json({ ...fresh, id: fresh._id?.toString() });
+  } catch (e) {
+    console.error("[orders] PATCH /api/user/orders/:orderId/design-fix failed:", e?.message || e);
     res.status(500).json({ error: e.message });
   }
 });
