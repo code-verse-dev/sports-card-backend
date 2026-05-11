@@ -251,8 +251,6 @@ function customerMayAccessOrder(user, orderLean) {
 
 /** Status that lets the customer edit their order's design without paying. Set by admin via status change. */
 const DESIGN_FIX_STATUS = "request_review";
-/** After the customer submits their edits, the order returns to this status so admin can re-review. */
-const DESIGN_FIX_RESOLVED_STATUS = "confirmed";
 
 /** GET /api/user/orders/:orderId — one order (for fix-design flow). */
 router.get("/orders/:orderId", requireCustomer, async (req, res) => {
@@ -388,17 +386,26 @@ router.patch("/orders/:orderId/design-fix", requireCustomer, async (req, res) =>
       });
     }
 
-    /** Submission auto-restores status (admin can re-review) and clears any legacy fix-request flags. */
-    await Order.findByIdAndUpdate(oid, {
-      $set: {
-        items,
-        status: DESIGN_FIX_RESOLVED_STATUS,
-        designFixLastSubmittedAt: new Date(),
-        designFixRequestedAt: null,
-        designFixNote: null,
+    /**
+     * Stay in `request_review` until the admin manually moves the order forward — they need
+     * to look at the customer's resubmission before greenlighting production. Explicitly set
+     * `status` here so nothing else can leave the row appearing as `confirmed` after a save.
+     * Stamp `designFixLastSubmittedAt` for admin visibility; clear legacy fix-request flags.
+     */
+    const fresh = await Order.findByIdAndUpdate(
+      oid,
+      {
+        $set: {
+          items,
+          status: DESIGN_FIX_STATUS,
+          designFixLastSubmittedAt: new Date(),
+          designFixRequestedAt: null,
+          designFixNote: null,
+        },
       },
-    });
-    const fresh = await Order.findById(oid).lean();
+      { new: true, lean: true }
+    );
+    if (!fresh) return res.status(404).json({ error: "Order not found" });
     res.json({ ...fresh, id: fresh._id?.toString() });
   } catch (e) {
     console.error("[orders] PATCH /api/user/orders/:orderId/design-fix failed:", e?.message || e);
