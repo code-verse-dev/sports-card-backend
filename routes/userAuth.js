@@ -287,7 +287,7 @@ router.patch("/orders/:orderId/design-fix", requireCustomer, async (req, res) =>
     if (!oid || !mongoose.Types.ObjectId.isValid(oid)) {
       return res.status(400).json({ error: "Invalid order id" });
     }
-    const { lineIndex, designSnapshotPatch } = req.body || {};
+    const { lineIndex, designSnapshotPatch, designFontOverridesPatch } = req.body || {};
     const idx = Number(lineIndex);
     if (!Number.isInteger(idx) || idx < 0) {
       return res.status(400).json({ error: "lineIndex must be a non-negative integer" });
@@ -295,6 +295,10 @@ router.patch("/orders/:orderId/design-fix", requireCustomer, async (req, res) =>
     if (!designSnapshotPatch || typeof designSnapshotPatch !== "object" || Array.isArray(designSnapshotPatch)) {
       return res.status(400).json({ error: "designSnapshotPatch (object) required" });
     }
+    const fontPatchProvided =
+      designFontOverridesPatch != null &&
+      typeof designFontOverridesPatch === "object" &&
+      !Array.isArray(designFontOverridesPatch);
 
     const order = await Order.findById(oid);
     if (!order) return res.status(404).json({ error: "Order not found" });
@@ -329,6 +333,28 @@ router.patch("/orders/:orderId/design-fix", requireCustomer, async (req, res) =>
         ? { ...row.designSnapshot }
         : {};
     row.designSnapshot = { ...prevSnap, ...patch };
+    if (fontPatchProvided) {
+      const prevFontOverrides =
+        row.designFontOverrides && typeof row.designFontOverrides === "object" && !Array.isArray(row.designFontOverrides)
+          ? { ...row.designFontOverrides }
+          : {};
+      const cleanedFontOverrides = {};
+      for (const [fieldId, value] of Object.entries(designFontOverridesPatch)) {
+        const key = String(fieldId || "").trim();
+        if (!key || key.length > 160) continue;
+        if (value == null) {
+          cleanedFontOverrides[key] = undefined;
+          continue;
+        }
+        if (typeof value !== "object" || Array.isArray(value)) continue;
+        const v = {};
+        for (const fontKey of ["family", "size", "weight", "transform"]) {
+          if (value[fontKey] != null) v[fontKey] = String(value[fontKey]).slice(0, 200);
+        }
+        cleanedFontOverrides[key] = v;
+      }
+      row.designFontOverrides = { ...prevFontOverrides, ...cleanedFontOverrides };
+    }
     items[idx] = row;
 
     try {
