@@ -1645,10 +1645,31 @@ function blogPostToJson(doc) {
     publishedAt: o.publishedAt,
     metaTitle: o.metaTitle ?? "",
     metaDescription: o.metaDescription ?? "",
+    canonicalUrl: o.canonicalUrl ?? "",
+    ogTitle: o.ogTitle ?? "",
+    ogDescription: o.ogDescription ?? "",
+    ogImageId: o.ogImageId ?? "",
+    authorName: o.authorName ?? "",
+    featuredImageId: o.featuredImageId ?? "",
     faqs,
     createdAt: o.createdAt,
     updatedAt: o.updatedAt,
   };
+}
+
+function blogPostAdminSaveErrorResponse(e) {
+  const code = e?.code;
+  if (code === 11000) {
+    return { status: 409, message: "A post with this URL slug already exists. Change the slug and try again." };
+  }
+  const msg = e?.message ? String(e.message) : "Save failed";
+  return { status: 500, message: msg };
+}
+
+function trimBlogString(v, maxLen) {
+  const s = v != null ? String(v).trim() : "";
+  if (!maxLen || s.length <= maxLen) return s;
+  return s.slice(0, maxLen);
 }
 
 /** Published posts for the public blog (optional storefront use). */
@@ -1860,6 +1881,9 @@ app.get("/api/admin/blog-posts", maybeRequireAdmin, async (req, res) => {
 app.get("/api/admin/blog-posts/:id", maybeRequireAdmin, async (req, res) => {
   try {
     if (!dbConnected()) return res.status(503).json({ error: "Database not connected" });
+    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+      return res.status(400).json({ error: "Invalid post id" });
+    }
     const doc = await BlogPost.findById(req.params.id);
     if (!doc) return res.status(404).json({ error: "Not found" });
     res.json(blogPostToJson(doc));
@@ -1886,27 +1910,43 @@ app.post("/api/admin/blog-posts", maybeRequireAdmin, async (req, res) => {
       contentHtml: body.contentHtml != null ? String(body.contentHtml) : "",
       published,
       publishedAt,
-      metaTitle: body.metaTitle != null ? String(body.metaTitle) : "",
-      metaDescription: body.metaDescription != null ? String(body.metaDescription) : "",
+      metaTitle: trimBlogString(body.metaTitle, 200),
+      metaDescription: trimBlogString(body.metaDescription, 500),
+      canonicalUrl: trimBlogString(body.canonicalUrl, 2000),
+      ogTitle: trimBlogString(body.ogTitle, 200),
+      ogDescription: trimBlogString(body.ogDescription, 500),
+      ogImageId: trimBlogString(body.ogImageId, 120),
+      authorName: trimBlogString(body.authorName, 200),
+      featuredImageId: trimBlogString(body.featuredImageId, 120),
       faqs: normalizeBlogFaqs(body.faqs),
     });
     res.status(201).json(blogPostToJson(doc));
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    const { status, message } = blogPostAdminSaveErrorResponse(e);
+    res.status(status).json({ error: message });
   }
 });
 
 app.put("/api/admin/blog-posts/:id", maybeRequireAdmin, async (req, res) => {
   try {
     if (!dbConnected()) return res.status(503).json({ error: "Database not connected" });
+    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+      return res.status(400).json({ error: "Invalid post id" });
+    }
     const doc = await BlogPost.findById(req.params.id);
     if (!doc) return res.status(404).json({ error: "Not found" });
     const body = req.body || {};
     if (body.title !== undefined) doc.title = String(body.title).trim();
     if (body.excerpt !== undefined) doc.excerpt = String(body.excerpt);
     if (body.contentHtml !== undefined) doc.contentHtml = String(body.contentHtml);
-    if (body.metaTitle !== undefined) doc.metaTitle = String(body.metaTitle);
-    if (body.metaDescription !== undefined) doc.metaDescription = String(body.metaDescription);
+    if (body.metaTitle !== undefined) doc.metaTitle = trimBlogString(body.metaTitle, 200);
+    if (body.metaDescription !== undefined) doc.metaDescription = trimBlogString(body.metaDescription, 500);
+    if (body.canonicalUrl !== undefined) doc.canonicalUrl = trimBlogString(body.canonicalUrl, 2000);
+    if (body.ogTitle !== undefined) doc.ogTitle = trimBlogString(body.ogTitle, 200);
+    if (body.ogDescription !== undefined) doc.ogDescription = trimBlogString(body.ogDescription, 500);
+    if (body.ogImageId !== undefined) doc.ogImageId = trimBlogString(body.ogImageId, 120);
+    if (body.authorName !== undefined) doc.authorName = trimBlogString(body.authorName, 200);
+    if (body.featuredImageId !== undefined) doc.featuredImageId = trimBlogString(body.featuredImageId, 120);
     if (body.slug !== undefined) {
       const next = await ensureUniqueBlogSlug(String(body.slug).trim() || doc.title, doc._id);
       doc.slug = next;
@@ -1926,13 +1966,17 @@ app.put("/api/admin/blog-posts/:id", maybeRequireAdmin, async (req, res) => {
     await doc.save();
     res.json(blogPostToJson(doc));
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    const { status, message } = blogPostAdminSaveErrorResponse(e);
+    res.status(status).json({ error: message });
   }
 });
 
 app.delete("/api/admin/blog-posts/:id", maybeRequireAdmin, async (req, res) => {
   try {
     if (!dbConnected()) return res.status(503).json({ error: "Database not connected" });
+    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+      return res.status(400).json({ error: "Invalid post id" });
+    }
     const deleted = await BlogPost.findByIdAndDelete(req.params.id);
     if (!deleted) return res.status(404).json({ error: "Not found" });
     res.status(204).send();
