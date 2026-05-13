@@ -55,6 +55,14 @@ import {
   filterDesignedItemsForCardCapture,
 } from "./services/orderCardPdfExportMeta.js";
 import { buildOrderCardImagesZipHeadless } from "./services/orderCardCaptureHeadless.js";
+import {
+  buildSitemapIndex,
+  buildPageSitemap,
+  buildProductSitemap,
+  buildCategorySitemap,
+  buildPostSitemap,
+  resolvePublicBaseUrl,
+} from "./services/sitemap.js";
 import { buildFullOrderCardPdfBufferHeadless } from "./services/orderCardPdfHeadless.js";
 import { augmentPuppeteerLaunchError } from "./services/puppeteerLaunchConfig.js";
 import { profileFromBody, setCustomerPasswordById } from "./services/customerProfile.js";
@@ -1678,7 +1686,7 @@ app.get("/api/blog/posts", async (req, res) => {
     if (!dbConnected()) return res.status(503).json({ error: "Database not connected" });
     const list = await BlogPost.find({ published: true })
       .sort({ publishedAt: -1, updatedAt: -1 })
-      .select("title slug excerpt published publishedAt updatedAt createdAt metaTitle metaDescription")
+      .select("title slug excerpt published publishedAt updatedAt createdAt metaTitle metaDescription featuredImageId")
       .lean();
     const out = list.map((row) => ({
       ...row,
@@ -2067,9 +2075,71 @@ app.get("/robots.txt", async (req, res) => {
   if (!ok) res.status(404).type("text/plain").send("robots.txt not found on server");
 });
 
+/**
+ * Sitemaps (Yoast-style): `/sitemap.xml` is a sitemap index pointing to four URL sitemaps below.
+ * Submit `https://<site>/sitemap.xml` to Google Search Console; the others are discovered automatically.
+ * URLs render against `PUBLIC_APP_URL` so they always look like the canonical storefront origin even when
+ * Vercel proxies these paths to the API. Each route is cached briefly so crawlers/CDNs don't re-render
+ * the XML for every hit, but the TTL is short enough that newly published content is picked up quickly.
+ */
+function sendSitemapXml(res, xml, { maxAgeSeconds = 600 } = {}) {
+  res.setHeader("Content-Type", "application/xml; charset=utf-8");
+  res.setHeader("Cache-Control", `public, max-age=${maxAgeSeconds}, s-maxage=${maxAgeSeconds}`);
+  res.status(200).send(xml);
+}
+
+function handleSitemapError(res, e) {
+  if (!dbConnected()) return res.status(503).type("text/plain").send("Database not connected");
+  return res.status(500).type("text/plain").send(e?.message || "Sitemap generation failed");
+}
+
 app.get("/sitemap.xml", async (req, res) => {
-  const ok = await sendSeoPublicFile(res, "sitemap.xml", "application/xml; charset=utf-8");
-  if (!ok) res.status(404).type("text/plain").send("sitemap.xml not found on server");
+  try {
+    if (!dbConnected()) return res.status(503).type("text/plain").send("Database not connected");
+    const xml = await buildSitemapIndex(resolvePublicBaseUrl(req));
+    sendSitemapXml(res, xml);
+  } catch (e) {
+    handleSitemapError(res, e);
+  }
+});
+
+app.get("/page-sitemap.xml", (req, res) => {
+  try {
+    const xml = buildPageSitemap(resolvePublicBaseUrl(req));
+    sendSitemapXml(res, xml, { maxAgeSeconds: 3600 });
+  } catch (e) {
+    handleSitemapError(res, e);
+  }
+});
+
+app.get("/product-sitemap.xml", async (req, res) => {
+  try {
+    if (!dbConnected()) return res.status(503).type("text/plain").send("Database not connected");
+    const xml = await buildProductSitemap(resolvePublicBaseUrl(req));
+    sendSitemapXml(res, xml);
+  } catch (e) {
+    handleSitemapError(res, e);
+  }
+});
+
+app.get("/category-sitemap.xml", async (req, res) => {
+  try {
+    if (!dbConnected()) return res.status(503).type("text/plain").send("Database not connected");
+    const xml = await buildCategorySitemap(resolvePublicBaseUrl(req));
+    sendSitemapXml(res, xml);
+  } catch (e) {
+    handleSitemapError(res, e);
+  }
+});
+
+app.get("/post-sitemap.xml", async (req, res) => {
+  try {
+    if (!dbConnected()) return res.status(503).type("text/plain").send("Database not connected");
+    const xml = await buildPostSitemap(resolvePublicBaseUrl(req));
+    sendSitemapXml(res, xml);
+  } catch (e) {
+    handleSitemapError(res, e);
+  }
 });
 
 // Serve built frontend (dist) so the app loads when opening the server URL (e.g. after npm run build).
