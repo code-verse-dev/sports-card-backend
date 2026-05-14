@@ -16,6 +16,31 @@ import { emitAdminNotification } from "../services/adminSocketHub.js";
 
 const router = Router();
 
+/** Pick a short image ref from designSnapshot for list thumbnails (upload UUID / uuid.ext / http URL — skips data: URLs). */
+function previewImageRefFromSnapshot(designSnapshot) {
+  if (!designSnapshot || typeof designSnapshot !== "object") return undefined;
+  const UPLOAD_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(\.[a-z0-9]+)?$/i;
+  const keys = Object.keys(designSnapshot);
+  const rank = (k) => {
+    const kl = k.toLowerCase();
+    if (/front.*image|^front_image/.test(kl)) return 0;
+    if (kl.includes("image")) return 1;
+    return 2;
+  };
+  keys.sort((a, b) => rank(a) - rank(b) || a.localeCompare(b));
+  for (const k of keys) {
+    const v = designSnapshot[k];
+    if (typeof v !== "string") continue;
+    const t = v.trim();
+    if (!t || t.startsWith("data:")) continue;
+    if (t.length > 600) continue;
+    if (/^https?:\/\//i.test(t)) return t.split("?")[0];
+    const base = t.split("?")[0].trim();
+    if (UPLOAD_ID_RE.test(base)) return base;
+  }
+  return undefined;
+}
+
 /** POST /api/user/register - body: { email, password, firstName?, lastName?, phone?, address?, addressLine2?, city?, state?, zip?, country? }. Creates customer account. */
 router.post("/register", async (req, res) => {
   if (!dbConnected()) {
@@ -434,7 +459,7 @@ router.get("/templates", requireCustomer, async (req, res) => {
     if (!userId) return res.status(401).json({ error: "Unauthorized" });
     const list = await UserSavedDesign.find({ userId })
       .sort({ updatedAt: -1 })
-      .select("_id userId templateId templateName name createdAt updatedAt")
+      .select("_id userId templateId templateName name createdAt updatedAt previewImageRef")
       .lean();
     const withId = list.map((d) => ({
       ...d,
@@ -455,14 +480,17 @@ router.post("/templates", requireCustomer, async (req, res) => {
     const { templateId, templateName, name, designSnapshot, designFontOverrides, cartSelection } = req.body || {};
     const tid = String(templateId || "").trim();
     if (!tid) return res.status(400).json({ error: "templateId required" });
+    const snap = designSnapshot && typeof designSnapshot === "object" ? designSnapshot : {};
+    const previewImageRef = previewImageRefFromSnapshot(snap);
     const doc = await UserSavedDesign.create({
       userId,
       templateId: tid,
       templateName: templateName != null ? String(templateName).trim() : undefined,
       name: name != null ? String(name).trim() : undefined,
-      designSnapshot: designSnapshot && typeof designSnapshot === "object" ? designSnapshot : {},
+      designSnapshot: snap,
       designFontOverrides: designFontOverrides && typeof designFontOverrides === "object" ? designFontOverrides : {},
       cartSelection: cartSelection && typeof cartSelection === "object" ? cartSelection : undefined,
+      ...(previewImageRef ? { previewImageRef } : {}),
     });
     const out = doc.toObject();
     res.status(201).json({ ...out, id: out._id?.toString() });
@@ -479,7 +507,14 @@ router.get("/templates/:id", requireCustomer, async (req, res) => {
     if (!userId) return res.status(401).json({ error: "Unauthorized" });
     const doc = await UserSavedDesign.findOne({ _id: req.params.id, userId }).lean();
     if (!doc) return res.status(404).json({ error: "Saved design not found" });
-    res.json({ ...doc, id: doc._id?.toString() });
+    const computed = previewImageRefFromSnapshot(doc.designSnapshot);
+    const existing = String(doc.previewImageRef || "").trim();
+    let out = { ...doc, id: doc._id?.toString() };
+    if (computed && computed !== existing) {
+      await UserSavedDesign.updateOne({ _id: doc._id, userId }, { $set: { previewImageRef: computed } });
+      out = { ...out, previewImageRef: computed };
+    }
+    res.json(out);
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
@@ -496,7 +531,11 @@ router.patch("/templates/:id", requireCustomer, async (req, res) => {
     const { name, designSnapshot, designFontOverrides, templateName, cartSelection } = req.body || {};
     if (name !== undefined) doc.name = String(name).trim() || undefined;
     if (templateName !== undefined) doc.templateName = String(templateName).trim() || undefined;
-    if (designSnapshot !== undefined && typeof designSnapshot === "object") doc.designSnapshot = designSnapshot;
+    if (designSnapshot !== undefined && typeof designSnapshot === "object") {
+      doc.designSnapshot = designSnapshot;
+      const pr = previewImageRefFromSnapshot(designSnapshot);
+      if (pr) doc.previewImageRef = pr;
+    }
     if (designFontOverrides !== undefined && typeof designFontOverrides === "object") doc.designFontOverrides = designFontOverrides;
     if (cartSelection !== undefined) doc.cartSelection = cartSelection && typeof cartSelection === "object" ? cartSelection : undefined;
     await doc.save();
