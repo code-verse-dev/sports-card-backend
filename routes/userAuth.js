@@ -171,15 +171,16 @@ router.get("/me", requireCustomer, (req, res) => {
     state: u.state,
     zip: u.zip,
     country: u.country,
+    avatarImageRef: u.avatarImageRef,
   });
 });
 
-/** PATCH /api/user/me - requires auth. Body: { firstName?, lastName?, phone?, address?, addressLine2?, city?, state?, zip?, country? }. */
+/** PATCH /api/user/me - requires auth. Body: { firstName?, lastName?, phone?, address?, addressLine2?, city?, state?, zip?, country?, avatarImageRef? }. */
 router.patch("/me", requireCustomer, async (req, res) => {
   try {
     const user = req.customerUser;
     if (!user) return res.status(401).json({ error: "Unauthorized" });
-    const { firstName, lastName, phone, address, addressLine2, city, state, zip, country } = req.body || {};
+    const { firstName, lastName, phone, address, addressLine2, city, state, zip, country, avatarImageRef } = req.body || {};
     if (firstName !== undefined) user.firstName = String(firstName).trim() || undefined;
     if (lastName !== undefined) user.lastName = String(lastName).trim() || undefined;
     if (phone !== undefined) user.phone = String(phone).trim() || undefined;
@@ -189,6 +190,10 @@ router.patch("/me", requireCustomer, async (req, res) => {
     if (state !== undefined) user.state = String(state).trim() || undefined;
     if (zip !== undefined) user.zip = String(zip).trim() || undefined;
     if (country !== undefined) user.country = String(country).trim() || undefined;
+    if (avatarImageRef !== undefined) {
+      const av = String(avatarImageRef ?? "").trim();
+      user.avatarImageRef = av || undefined;
+    }
     await user.save();
     res.json({
       email: user.email,
@@ -202,6 +207,7 @@ router.patch("/me", requireCustomer, async (req, res) => {
       state: user.state,
       zip: user.zip,
       country: user.country,
+      avatarImageRef: user.avatarImageRef,
     });
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -211,7 +217,9 @@ router.patch("/me", requireCustomer, async (req, res) => {
 /** POST /api/user/change-password - requires auth. Body: { currentPassword, newPassword }. */
 router.post("/change-password", requireCustomer, async (req, res) => {
   try {
-    const user = req.customerUser;
+    const id = req.customerUser?._id;
+    if (!id) return res.status(401).json({ error: "Unauthorized" });
+    const user = await CustomerUser.findById(id).select("+passwordHash");
     if (!user) return res.status(401).json({ error: "Unauthorized" });
     const { currentPassword, newPassword } = req.body || {};
     const current = String(currentPassword || "").trim();

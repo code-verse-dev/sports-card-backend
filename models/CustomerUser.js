@@ -25,6 +25,8 @@ const customerUserSchema = new mongoose.Schema(
     state: { type: String, trim: true },
     zip: { type: String, trim: true },
     country: { type: String, trim: true },
+    /** Checkout-upload file id (uuid or uuid.ext) for profile photo in My account. */
+    avatarImageRef: { type: String, trim: true },
   },
   { timestamps: true }
 );
