@@ -426,13 +426,16 @@ router.patch("/orders/:orderId/design-fix", requireCustomer, async (req, res) =>
 
 // ---------- Saved designs (user's created templates) ----------
 
-/** GET /api/user/templates - list saved designs for the current user. */
+/** GET /api/user/templates - list saved designs (metadata only). Full snapshot/fonts/cart: GET /api/user/templates/:id — avoids multi-megabyte JSON when snapshots embed base64 images. */
 router.get("/templates", requireCustomer, async (req, res) => {
   try {
     if (!dbConnected()) return res.status(503).json({ error: "Saved designs not available" });
     const userId = req.customerUser?._id;
     if (!userId) return res.status(401).json({ error: "Unauthorized" });
-    const list = await UserSavedDesign.find({ userId }).sort({ updatedAt: -1 }).lean();
+    const list = await UserSavedDesign.find({ userId })
+      .sort({ updatedAt: -1 })
+      .select("_id userId templateId templateName name createdAt updatedAt")
+      .lean();
     const withId = list.map((d) => ({
       ...d,
       id: d._id?.toString(),
