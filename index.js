@@ -779,6 +779,7 @@ function customerUserToJson(doc) {
     zip: o.zip,
     country: o.country,
     isRegistered: Boolean(o.isRegistered),
+    avatarImageRef: o.avatarImageRef,
     createdAt: o.createdAt,
     updatedAt: o.updatedAt,
   };
