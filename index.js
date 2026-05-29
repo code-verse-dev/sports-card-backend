@@ -38,6 +38,7 @@ import { Subcategory } from "./models/Subcategory.js";
 import { BlogPost } from "./models/BlogPost.js";
 import { BlogComment } from "./models/BlogComment.js";
 import { BlogLike } from "./models/BlogLike.js";
+import { ContactSubmission } from "./models/ContactSubmission.js";
 import { FEATURED_BLOG_SEEDS, seedContentHtml } from "./data/featured-blog-seeds.js";
 import { getPriceConfig, setPriceConfig } from "./models/PriceConfig.js";
 import { AdminUser, hashPassword } from "./models/AdminUser.js";
@@ -47,7 +48,7 @@ import {
   sendTrackingInfoCustomerEmail,
   sendDesignFixRequestedCustomerEmail,
 } from "./services/orderEmails.js";
-import { initAdminSocket } from "./services/adminSocketHub.js";
+import { initAdminSocket, emitAdminNotification } from "./services/adminSocketHub.js";
 import { getOrderCustomerView } from "./services/orderCustomer.js";
 import {
   filterItemsForAdminEmailCardPdf,
@@ -2025,6 +2026,134 @@ app.post("/api/admin/blog-posts/seed-featured", maybeRequireAdmin, async (req, r
       count += 1;
     }
     res.json({ ok: true, seeded: count });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ---------- Public: Contact form ----------
+function contactSubmissionToJson(doc) {
+  if (!doc) return null;
+  const o = doc.toObject ? doc.toObject() : doc;
+  return {
+    id: o._id?.toString() ?? o.id,
+    firstName: o.firstName ?? "",
+    lastName: o.lastName ?? "",
+    phone: o.phone ?? "",
+    email: o.email ?? "",
+    message: o.message ?? "",
+    read: Boolean(o.read),
+    createdAt: o.createdAt,
+    updatedAt: o.updatedAt,
+  };
+}
+
+function isValidContactEmail(email) {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+}
+
+app.post("/api/contact", async (req, res) => {
+  try {
+    if (!dbConnected()) return res.status(503).json({ error: "Database not connected" });
+    const body = req.body || {};
+    const firstName = body.firstName != null ? String(body.firstName).trim() : "";
+    const lastName = body.lastName != null ? String(body.lastName).trim() : "";
+    const phone = body.phone != null ? String(body.phone).trim() : "";
+    const email = body.email != null ? String(body.email).trim().toLowerCase() : "";
+    const message = body.message != null ? String(body.message).trim() : "";
+
+    if (!firstName) return res.status(400).json({ error: "First name is required" });
+    if (!email) return res.status(400).json({ error: "Email is required" });
+    if (!isValidContactEmail(email)) return res.status(400).json({ error: "Please enter a valid email address" });
+    if (!message) return res.status(400).json({ error: "Message is required" });
+    if (message.length > 10000) return res.status(400).json({ error: "Message is too long" });
+
+    const doc = await ContactSubmission.create({
+      firstName: firstName.slice(0, 120),
+      lastName: lastName.slice(0, 120),
+      phone: phone.slice(0, 40),
+      email: email.slice(0, 320),
+      message: message.slice(0, 10000),
+    });
+
+    emitAdminNotification({
+      kind: "contact_submission",
+      contactId: doc._id.toString(),
+      email: doc.email,
+    });
+
+    res.status(201).json({ ok: true, id: doc._id.toString() });
+  } catch (e) {
+    console.error("[contact] POST /api/contact failed:", e?.message || e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ---------- Admin: Contact submissions ----------
+app.get("/api/admin/contact-submissions", maybeRequireAdmin, async (req, res) => {
+  try {
+    if (!dbConnected()) return res.status(503).json({ error: "Database not connected" });
+    const page = Math.max(1, parseInt(String(firstQueryParam(req.query.page) ?? "1"), 10) || 1);
+    const limitRaw = parseInt(String(firstQueryParam(req.query.limit) ?? "20"), 10);
+    const limit = Math.min(100, Math.max(1, Number.isFinite(limitRaw) && limitRaw > 0 ? limitRaw : 20));
+    const q = req.query.q ? String(req.query.q).trim() : "";
+    const unreadOnly = String(firstQueryParam(req.query.unread) ?? "").trim() === "1";
+    const skip = (page - 1) * limit;
+    const filter = {};
+    if (unreadOnly) filter.read = false;
+    if (q) {
+      const re = new RegExp(escapeRegex(q), "i");
+      filter.$or = [{ email: re }, { firstName: re }, { lastName: re }, { phone: re }, { message: re }];
+    }
+    const [total, docs] = await Promise.all([
+      ContactSubmission.countDocuments(filter),
+      ContactSubmission.find(filter).sort({ createdAt: -1 }).skip(skip).limit(limit).lean(),
+    ]);
+    const submissions = docs.map((row) => contactSubmissionToJson(row));
+    const totalPages = Math.max(1, Math.ceil(total / limit));
+    return res.json({ submissions, total, page, limit, totalPages });
+  } catch (e) {
+    console.error("[admin] GET /api/admin/contact-submissions failed:", e?.message || e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get("/api/admin/contact-submissions/:id", maybeRequireAdmin, async (req, res) => {
+  try {
+    if (!dbConnected()) return res.status(503).json({ error: "Database not connected" });
+    const id = (req.params.id || "").trim();
+    if (!mongoose.Types.ObjectId.isValid(id)) return res.status(400).json({ error: "Invalid id" });
+    const doc = await ContactSubmission.findById(id).lean();
+    if (!doc) return res.status(404).json({ error: "Not found" });
+    return res.json(contactSubmissionToJson(doc));
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.patch("/api/admin/contact-submissions/:id", maybeRequireAdmin, async (req, res) => {
+  try {
+    if (!dbConnected()) return res.status(503).json({ error: "Database not connected" });
+    const id = (req.params.id || "").trim();
+    if (!mongoose.Types.ObjectId.isValid(id)) return res.status(400).json({ error: "Invalid id" });
+    const doc = await ContactSubmission.findById(id);
+    if (!doc) return res.status(404).json({ error: "Not found" });
+    if (req.body?.read !== undefined) doc.read = Boolean(req.body.read);
+    await doc.save();
+    return res.json(contactSubmissionToJson(doc));
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.delete("/api/admin/contact-submissions/:id", maybeRequireAdmin, async (req, res) => {
+  try {
+    if (!dbConnected()) return res.status(503).json({ error: "Database not connected" });
+    const id = (req.params.id || "").trim();
+    if (!mongoose.Types.ObjectId.isValid(id)) return res.status(400).json({ error: "Invalid id" });
+    const deleted = await ContactSubmission.findByIdAndDelete(id);
+    if (!deleted) return res.status(404).json({ error: "Not found" });
+    return res.status(204).send();
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
