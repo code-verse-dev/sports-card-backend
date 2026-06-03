@@ -8,6 +8,8 @@
     "start": "node index.js",
     "dev": "node --watch index.js",
     "migrate:categories": "node scripts/migrate-categories-to-url-ids.js",
+    "migrate:softball-ids": "node scripts/migrate-softball-template-ids.js",
+    "migrate:softball-ids:apply": "node scripts/migrate-softball-template-ids.js --apply",
     "smtp:test": "node scripts/smtp-test.js",
     "email:scenarios": "node scripts/email-scenarios-test.js",
     "email:test-admin-last-order": "node scripts/send-test-admin-last-order-email.js",
