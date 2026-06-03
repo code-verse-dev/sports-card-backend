@@ -34,3 +34,17 @@ If this folder was not copied to live, copy at least `server/scripts/migrate-cat
   node server/scripts/backfill-template-slugs.js
   ```
 - **Requires:** `MONGODB_URI` in the environment (e.g. in `server/.env`).
+
+## One-time migration: softball product URL slugs (DB only)
+
+- **Script:** `migrate-softball-template-ids.js`
+- **When:** Softball list cards open the wrong product because `templateId` ends in a generic color (`Orange`, `Blue`, etc.).
+- **What it does:** Sets `templateId` to unique paths like `sports-cards-trading-cards/softball/softball-option-2-orange`. Old `templateId` values are appended to `legacyIds`. UUID `id` fields are not changed.
+- **Dry run:**
+  ```bash
+  npm run migrate:softball-ids
+  ```
+- **Apply:**
+  ```bash
+  npm run migrate:softball-ids:apply
+  ```

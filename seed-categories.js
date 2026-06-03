@@ -13,6 +13,7 @@ export const DEFAULT_CATEGORIES = [
   { id: "promotional-corporate", name: "Promotional Corporate", order: 5 },
   { id: "music", name: "Music", order: 6 },
   { id: "life-style", name: "Life Style", order: 7 },
+  { id: "organization", name: "Organization", order: 8 },
 ];
 
 /** Subcategory: id (URL slug), categoryId (category slug), name, order */
@@ -51,6 +52,9 @@ export const DEFAULT_SUBCATEGORIES = [
   { id: "employee", name: "Employee", categoryId: "promotional-corporate", order: 0 },
   { id: "music", name: "Music", categoryId: "music", order: 0 },
   { id: "life-style", name: "Life Style", categoryId: "life-style", order: 0 },
+  { id: "alliance-therapy-dog", name: "Alliance Therapy Dog", categoryId: "organization", order: 0 },
+  { id: "certa-pro-painters", name: "Certa Pro Painters", categoryId: "organization", order: 1 },
+  { id: "first-responder-therapy-dogs", name: "First Responder Therapy Dogs", categoryId: "organization", order: 2 },
 ];
 
 /** Old category id → new (URL slug) id for migration */
