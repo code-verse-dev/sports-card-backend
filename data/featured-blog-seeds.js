@@ -37,7 +37,7 @@ function escapeHtml(s) {
     .replace(/"/g, "&quot;");
 }
 
-/** Minimal HTML body for seeded posts (full UX remains on existing React pages at /blog/:slug). */
+/** Minimal HTML body for seeded posts (full UX remains on existing React pages at /:slug). */
 export function seedContentHtml(excerpt) {
   const safe = escapeHtml(excerpt);
   return `<p>${safe}</p><p><em>Open the full article using the same link as before; content is also editable in Admin → Blog posts.</em></p>`;

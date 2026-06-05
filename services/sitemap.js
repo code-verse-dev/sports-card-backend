@@ -244,7 +244,7 @@ export async function buildPostSitemap(baseUrl) {
 
   let body = "";
   for (const row of rows) {
-    body += urlEntry(baseUrl, `/blog/${encodeURIComponent(row.slug)}`, row.lastmod, "monthly", "0.6");
+    body += urlEntry(baseUrl, `/${encodeURIComponent(row.slug)}`, row.lastmod, "monthly", "0.6");
   }
   return wrapUrlset(body);
 }
