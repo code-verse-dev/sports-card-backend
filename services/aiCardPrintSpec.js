@@ -10,6 +10,9 @@ export const PRINT_SPEC_2_5_X_3_5 = {
   dpi: 300,
 };
 
+/** Exact front/back AI frame canvas at 300 DPI (2.75" × 3.75" bleed). */
+export const AI_CARD_CANVAS_2_5_X_3_5 = { w: 825, h: 1125 };
+
 export const PRINT_SPEC_4_X_5_5 = {
   sizeOptionId: "4x5.5",
   shortName: "4 × 5.5 in (A2)",
@@ -53,8 +56,19 @@ export function getPrintSpecForSizeOptionId(sizeOptionId) {
 }
 
 export function bleedPixelDimensions(spec) {
+  if (spec.sizeOptionId === "2.5x3.5") {
+    return { ...AI_CARD_CANVAS_2_5_X_3_5 };
+  }
   return {
-    w: Math.ceil(spec.bleedIn.w * spec.dpi),
-    h: Math.ceil(spec.bleedIn.h * spec.dpi),
+    w: Math.round(spec.bleedIn.w * spec.dpi),
+    h: Math.round(spec.bleedIn.h * spec.dpi),
   };
+}
+
+export function canvasPixelPromptLine(spec) {
+  const { w, h } = bleedPixelDimensions(spec);
+  return (
+    `Output must fill the full portrait canvas EXACTLY ${w}×${h} pixels at ${spec.dpi} DPI ` +
+    `(full bleed ${spec.bleedIn.w}"×${spec.bleedIn.h}"). Edge-to-edge artwork, crisp print-ready PNG, no margins.`
+  );
 }
