@@ -147,6 +147,7 @@ const STATIC_PAGES = [
   { path: "/terms-of-service", changefreq: "yearly", priority: "0.3" },
   { path: "/faqs", changefreq: "monthly", priority: "0.6" },
   { path: "/your-design", changefreq: "monthly", priority: "0.7" },
+  { path: "/ai-card-creator", changefreq: "monthly", priority: "0.7" },
   { path: "/custom-design-size", changefreq: "monthly", priority: "0.6" },
   { path: "/how-it-works", changefreq: "monthly", priority: "0.7" },
   { path: "/order-tips", changefreq: "monthly", priority: "0.6" },
