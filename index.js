@@ -10,6 +10,7 @@ import cors from "cors";
 import jwt from "jsonwebtoken";
 import mongoose from "mongoose";
 import fs from "fs/promises";
+import { buildTemplateSlugOrQueries, pickBestTemplateCandidate } from "./services/templateSlugResolve.js";
 import { connectDB, dbConnected } from "./db.js";
 import { requireAdmin, requireCustomer, optionalCustomer } from "./middleware/auth.js";
 import adminAuthRouter from "./routes/adminAuth.js";
@@ -288,12 +289,12 @@ app.get("/api/templates/:idOrSlug", async (req, res) => {
       ],
     }).lean();
     if (!doc) {
-      doc = await Template.findOne({
-        $or: [
-          { id: new RegExp(`/${param.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`) },
-          { templateId: new RegExp(`/${param.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`) },
-        ],
-      }).lean();
+      const slugQueries = buildTemplateSlugOrQueries(param);
+      const candidates = await Template.find({ $or: slugQueries }).lean();
+      doc = pickBestTemplateCandidate(candidates, param, {
+        categoryId: req.query.categoryId || req.query.category,
+        subcategoryId: req.query.subcategoryId || req.query.subcategory,
+      });
     }
     if (!doc) return res.status(404).json({ error: "Template not found" });
     const id = (doc.id && String(doc.id).trim()) || (doc.templateId && String(doc.templateId).trim()) || doc._id?.toString();
