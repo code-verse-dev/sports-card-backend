@@ -8,6 +8,16 @@ function escapeRegex(value) {
   return String(value ?? "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
+/** Extra path patterns for slugs like martial-arts (sports/martial-arts/card/…). */
+function slugPathAlternatives(param) {
+  const s = String(param ?? "").trim();
+  if (!s) return [];
+  const alts = new Set([s]);
+  const compositeCard = s.match(/^(.+)-card$/i);
+  if (compositeCard) alts.add(`${compositeCard[1]}/card`);
+  return [...alts];
+}
+
 function templatePath(record) {
   return String(record.templateId ?? record.id ?? "").trim();
 }
@@ -53,13 +63,18 @@ function pickBestTemplateCandidate(candidates, param, filters = {}) {
  * Build Mongo queries used after exact id/templateId/legacyIds match fails.
  */
 export function buildTemplateSlugOrQueries(param) {
-  const escaped = escapeRegex(param);
-  return [
-    { id: new RegExp(`/${escaped}$`) },
-    { templateId: new RegExp(`/${escaped}$`) },
-    { id: new RegExp(`/${escaped}/`) },
-    { templateId: new RegExp(`/${escaped}/`) },
-  ];
+  const patterns = slugPathAlternatives(param);
+  const queries = [];
+  for (const p of patterns) {
+    const escaped = escapeRegex(p);
+    queries.push(
+      { id: new RegExp(`/${escaped}$`) },
+      { templateId: new RegExp(`/${escaped}$`) },
+      { id: new RegExp(`/${escaped}/`) },
+      { templateId: new RegExp(`/${escaped}/`) }
+    );
+  }
+  return queries;
 }
 
 export { pickBestTemplateCandidate };
