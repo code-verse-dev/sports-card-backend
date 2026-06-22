@@ -10,6 +10,32 @@ function captureJwtSecret() {
   return String(process.env.ORDER_CARD_PDF_JWT_SECRET || process.env.JWT_SECRET || "").trim();
 }
 
+/** Storefront {@link CardPreview} CSS width during headless capture (must match frontend CARD_PREVIEW_WIDTH). */
+const CAPTURE_PREVIEW_CSS_WIDTH = 326;
+
+/**
+ * Uniform scale for Puppeteer screenshots: preview renders at 326px CSS; export targets ~825px
+ * (2.75″ bleed @ 300dpi) so JPEGs are print-ready without changing aspect ratio.
+ */
+function getCaptureDeviceScaleFactor() {
+  const envScale = Number(process.env.ORDER_CARD_CAPTURE_DEVICE_SCALE);
+  if (Number.isFinite(envScale) && envScale > 0) {
+    return Math.min(8, Math.max(1, envScale));
+  }
+  const targetPx = Number(process.env.ORDER_CARD_CAPTURE_RENDER_WIDTH || 825);
+  const previewPx = Number(process.env.ORDER_CARD_CAPTURE_PREVIEW_WIDTH || CAPTURE_PREVIEW_CSS_WIDTH);
+  if (!Number.isFinite(targetPx) || !Number.isFinite(previewPx) || previewPx <= 0) {
+    return 825 / CAPTURE_PREVIEW_CSS_WIDTH;
+  }
+  return Math.min(8, Math.max(1, targetPx / previewPx));
+}
+
+function getCaptureJpegQuality() {
+  const parsed = Number(process.env.ORDER_CARD_CAPTURE_JPEG_QUALITY ?? 95);
+  if (!Number.isFinite(parsed)) return 95;
+  return Math.min(100, Math.max(1, Math.round(parsed)));
+}
+
 function getExportDpi() {
   const parsed = Number(process.env.ORDER_CARD_EXPORT_DPI || 300);
   if (!Number.isFinite(parsed)) return 300;
@@ -109,6 +135,8 @@ export async function collectOrderCardCaptureJpegEntries(order) {
   const gotoMs = Math.max(30000, Number(process.env.ORDER_CARD_CAPTURE_GOTO_TIMEOUT_MS || 120000));
   const waitFnMs = Math.max(45000, Number(process.env.ORDER_CARD_CAPTURE_WAIT_TIMEOUT_MS || 180000));
   const exportDpi = getExportDpi();
+  const captureScale = getCaptureDeviceScaleFactor();
+  const jpegQuality = getCaptureJpegQuality();
   const ref = getOrderRef(order);
   const filenameBase = `order-${ref}`;
 
@@ -120,6 +148,16 @@ export async function collectOrderCardCaptureJpegEntries(order) {
   try {
     const page = await browser.newPage();
     await page.setBypassCSP(true).catch(() => {});
+    await page.setViewport({
+      width: 1600,
+      height: 1400,
+      deviceScaleFactor: captureScale,
+    });
+    console.info(
+      "[orderCardCaptureHeadless] capture scale:",
+      captureScale.toFixed(3),
+      `(~${Math.round(CAPTURE_PREVIEW_CSS_WIDTH * captureScale)}px per card face, jpeg q=${jpegQuality}, dpi meta=${exportDpi})`
+    );
     page.setDefaultNavigationTimeout(gotoMs);
     page.setDefaultTimeout(waitFnMs);
     /** Suppress noisy third-party font-CSS failures; screenshots still succeed with fallback fonts. */
@@ -236,7 +274,7 @@ export async function collectOrderCardCaptureJpegEntries(order) {
         if (err) throw new Error(String(err));
         const handle = await page.$("#pdf-export-card");
         if (!handle) throw new Error("Card surface #pdf-export-card not found");
-        const jpegBuf = await handle.screenshot({ type: "jpeg", quality: 92 });
+        const jpegBuf = await handle.screenshot({ type: "jpeg", quality: jpegQuality });
         const jpegWithDpi = withJpegDpi(Buffer.from(jpegBuf), exportDpi);
         const name = `${filenameBase}${suffix}-${side}.jpg`;
         entries.push({ name, buffer: jpegWithDpi });
