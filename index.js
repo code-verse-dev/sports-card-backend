@@ -273,12 +273,10 @@ app.get("/api/templates", async (req, res) => {
   }
 });
 
-// GET /api/templates/:idOrSlug – accepts full id, templateId, legacyIds, or slug (last segment).
-// Frontend uses slug-only in URLs; backend resolves slug to template so frontend never needs to send internal id.
-app.get("/api/templates/:idOrSlug", async (req, res) => {
+async function sendTemplateByIdOrSlug(req, res, rawParam) {
   try {
     if (!dbConnected()) return res.status(503).json({ error: "Database not connected" });
-    const param = (req.params.idOrSlug || "").trim();
+    const param = String(rawParam || "").trim();
     if (!param) return res.status(400).json({ error: "Missing id or slug" });
     let doc = await Template.findOne({
       $or: [
@@ -302,6 +300,18 @@ app.get("/api/templates/:idOrSlug", async (req, res) => {
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
+}
+
+// GET /api/templates/:idOrSlug – accepts full id, templateId, legacyIds, or slug (last segment).
+// Frontend uses slug-only in URLs; backend resolves slug to template so frontend never needs to send internal id.
+app.get("/api/templates/:idOrSlug", async (req, res) => {
+  return sendTemplateByIdOrSlug(req, res, req.params.idOrSlug);
+});
+
+// Backwards compatibility for older/manual callers that send unencoded slash ids:
+// /api/templates/sports/baseball/baseball-trading-card-02.
+app.get("/api/templates/*", async (req, res) => {
+  return sendTemplateByIdOrSlug(req, res, req.params[0]);
 });
 
 // Register before app.use("/api/admin", …) so /api/admin/templates/* is not swallowed by the auth router.

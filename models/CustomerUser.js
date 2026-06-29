@@ -27,6 +27,10 @@ const customerUserSchema = new mongoose.Schema(
     country: { type: String, trim: true },
     /** Checkout-upload file id (uuid or uuid.ext) for profile photo in My account. */
     avatarImageRef: { type: String, trim: true },
+    /** Short-lived forgot-password code hash. */
+    passwordResetCodeHash: { type: String, select: false },
+    passwordResetExpiresAt: { type: Date, select: false },
+    passwordResetAttempts: { type: Number, default: 0, select: false },
   },
   { timestamps: true }
 );
