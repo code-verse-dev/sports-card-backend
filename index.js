@@ -162,6 +162,294 @@ function orderToJson(doc) {
   };
 }
 
+async function buildAdminOrdersFilter(status, email) {
+  const and = [];
+  if (status) and.push({ status });
+  if (email) {
+    const emailRe = new RegExp(escapeRegex(email), "i");
+    const [matchingUsers, byPublicId] = await Promise.all([
+      CustomerUser.find({ email: emailRe }).select("_id").lean(),
+      CustomerUser.find({ publicId: emailRe }).select("_id").lean(),
+    ]);
+    const cids = matchingUsers.map((u) => u._id);
+    const pubCids = byPublicId.map((u) => u._id);
+    const or = [{ "customer.email": emailRe }, { orderCode: emailRe }];
+    if (cids.length) or.push({ customerId: { $in: cids } });
+    if (pubCids.length) or.push({ customerId: { $in: pubCids } });
+    and.push({ $or: or });
+  }
+  return and.length === 0 ? {} : and.length === 1 ? and[0] : { $and: and };
+}
+
+function csvCell(value) {
+  const s = value == null ? "" : String(value);
+  return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+}
+
+function moneyFromCents(cents) {
+  return ((Number(cents) || 0) / 100).toFixed(2);
+}
+
+function customerName(customer) {
+  const first = String(customer?.firstName || "").trim();
+  const last = String(customer?.lastName || "").trim();
+  return [first, last].filter(Boolean).join(" ");
+}
+
+function customerAddress(customer) {
+  return [
+    customer?.address,
+    customer?.addressLine2,
+    [customer?.city, customer?.state, customer?.zip].filter(Boolean).join(" "),
+    customer?.country,
+  ]
+    .map((v) => String(v || "").trim())
+    .filter(Boolean)
+    .join(", ");
+}
+
+function orderExportRows(order) {
+  const customer = getOrderCustomerView(order) || {};
+  const items = Array.isArray(order.items) && order.items.length ? order.items : [{}];
+  const orderAmountCents =
+    (Number(order.totalCents) || 0) -
+    (Number(order.discountCents) || 0) +
+    (Number(order.shippingCents) || 0) +
+    (Number(order.taxCents) || 0);
+  const address = customerAddress(customer);
+  return items.map((item) => ({
+    orderNumber: getOrderRef(order),
+    dateOfOrder: order.createdAt ? new Date(order.createdAt).toISOString() : "",
+    orderAmount: moneyFromCents(orderAmountCents),
+    productAmount: moneyFromCents(item?.priceCents),
+    shippingAmount: moneyFromCents(order.shippingCents),
+    taxAmount: moneyFromCents(order.taxCents),
+    discountAmount: moneyFromCents(order.discountCents),
+    customerName: customerName(customer),
+    email: customer.email || "",
+    phone: customer.phone || "",
+    billingAddress: address,
+    shippingAddress: address,
+    product: item?.templateName || item?.templateId || "",
+    quantity: item?.quantity != null ? item.quantity : "",
+  }));
+}
+
+function ordersCsv(orders) {
+  const headers = [
+    "Order #",
+    "Date of order",
+    "Order Amount ($)",
+    "Product Amount ($)",
+    "Shipping Amount ($)",
+    "Tax Amount ($)",
+    "Discount Amount ($)",
+    "Customer Name",
+    "Email",
+    "Phone",
+    "Billing Address",
+    "Shipping Address",
+    "Product",
+    "Quantity",
+  ];
+  const rows = orders.flatMap(orderExportRows);
+  return [
+    headers.map(csvCell).join(","),
+    ...rows.map((row) =>
+      [
+        row.orderNumber,
+        row.dateOfOrder,
+        row.orderAmount,
+        row.productAmount,
+        row.shippingAmount,
+        row.taxAmount,
+        row.discountAmount,
+        row.customerName,
+        row.email,
+        row.phone,
+        row.billingAddress,
+        row.shippingAddress,
+        row.product,
+        row.quantity,
+      ]
+        .map(csvCell)
+        .join(",")
+    ),
+  ].join("\r\n");
+}
+
+const ADMIN_PAID_ORDER_STATUSES = ["confirmed", "in_production", "shipped", "delivered"];
+
+function paidOrderAmountCents(order) {
+  return (
+    (Number(order?.totalCents) || 0) -
+    (Number(order?.discountCents) || 0) +
+    (Number(order?.shippingCents) || 0) +
+    (Number(order?.taxCents) || 0)
+  );
+}
+
+function adminDateKey(value) {
+  const d = value ? new Date(value) : new Date(NaN);
+  return Number.isNaN(d.getTime()) ? "" : d.toISOString().slice(0, 10);
+}
+
+function dateSeries(days, source, valueKey) {
+  const out = [];
+  for (let i = days - 1; i >= 0; i--) {
+    const d = new Date();
+    d.setUTCHours(0, 0, 0, 0);
+    d.setUTCDate(d.getUTCDate() - i);
+    const date = d.toISOString().slice(0, 10);
+    out.push({ date, [valueKey]: source.get(date) || 0 });
+  }
+  return out;
+}
+
+function addSalesMetric(map, key, label, amountCents, quantity) {
+  const id = String(key || "").trim() || "unknown";
+  const row = map.get(id) || {
+    id,
+    label: label || id,
+    revenueCents: 0,
+    quantity: 0,
+    orderCount: 0,
+  };
+  row.revenueCents += Number(amountCents) || 0;
+  row.quantity += Number(quantity) || 0;
+  row.orderCount += 1;
+  map.set(id, row);
+}
+
+async function buildAdminSalesStats() {
+  const since30 = new Date();
+  since30.setUTCDate(since30.getUTCDate() - 29);
+  since30.setUTCHours(0, 0, 0, 0);
+
+  if (!dbConnected()) {
+    const orders = getAllOrders().filter((o) => ADMIN_PAID_ORDER_STATUSES.includes(o.status));
+    const last30RevenueByDay = new Map();
+    let totalRevenueCents = 0;
+    let last30RevenueCents = 0;
+    let last30OrderCount = 0;
+    let last30Quantity = 0;
+    for (const order of orders) {
+      const amount = paidOrderAmountCents(order);
+      totalRevenueCents += amount;
+      const created = new Date(order.createdAt);
+      if (!Number.isNaN(created.getTime()) && created >= since30) {
+        const key = adminDateKey(created);
+        last30RevenueByDay.set(key, (last30RevenueByDay.get(key) || 0) + amount);
+        last30RevenueCents += amount;
+        last30OrderCount += 1;
+        for (const item of order.items || []) last30Quantity += Number(item.quantity) || 0;
+      }
+    }
+    return {
+      generatedAt: new Date().toISOString(),
+      totalRevenueCents,
+      paidOrderCount: orders.length,
+      last30Days: {
+        revenueCents: last30RevenueCents,
+        orderCount: last30OrderCount,
+        quantity: last30Quantity,
+        averageRevenuePerDayCents: Math.round(last30RevenueCents / 30),
+        averageOrdersPerDay: Number((last30OrderCount / 30).toFixed(2)),
+        averageOrderValueCents: last30OrderCount ? Math.round(last30RevenueCents / last30OrderCount) : 0,
+      },
+      revenueLast30Days: dateSeries(30, last30RevenueByDay, "revenueCents"),
+      topCategories: [],
+      topSubcategories: [],
+      topProducts: [],
+    };
+  }
+
+  const [orders, templates, categories, subcategories] = await Promise.all([
+    Order.find({ status: { $in: ADMIN_PAID_ORDER_STATUSES } }).sort({ createdAt: -1 }).lean(),
+    Template.find({}).select("id templateId name categoryId subcategoryId template.name").lean(),
+    Category.find({}).select("id name").lean(),
+    Subcategory.find({}).select("id name categoryId").lean(),
+  ]);
+
+  const templateByKey = new Map();
+  for (const t of templates) {
+    for (const key of [t.id, t.templateId, t.template?.id]) {
+      const s = String(key || "").trim();
+      if (s) templateByKey.set(s, t);
+    }
+  }
+  const categoryName = new Map(categories.map((c) => [String(c.id || "").trim(), c.name || c.id]));
+  const subcategoryName = new Map(
+    subcategories.map((s) => [`${String(s.categoryId || "").trim()}::${String(s.id || "").trim()}`, s.name || s.id])
+  );
+
+  const categoryMap = new Map();
+  const subcategoryMap = new Map();
+  const productMap = new Map();
+  const last30RevenueByDay = new Map();
+  const last30OrdersByDay = new Map();
+  let totalRevenueCents = 0;
+  let last30RevenueCents = 0;
+  let last30OrderCount = 0;
+  let last30Quantity = 0;
+
+  for (const order of orders) {
+    const orderAmount = paidOrderAmountCents(order);
+    totalRevenueCents += orderAmount;
+    const created = new Date(order.createdAt);
+    const inLast30 = !Number.isNaN(created.getTime()) && created >= since30;
+    if (inLast30) {
+      const day = adminDateKey(created);
+      last30RevenueByDay.set(day, (last30RevenueByDay.get(day) || 0) + orderAmount);
+      last30OrdersByDay.set(day, (last30OrdersByDay.get(day) || 0) + 1);
+      last30RevenueCents += orderAmount;
+      last30OrderCount += 1;
+    }
+
+    for (const item of order.items || []) {
+      const quantity = Number(item?.quantity) || 0;
+      const itemRevenue = Number(item?.priceCents) || 0;
+      const tid = String(item?.templateId || "").trim();
+      const template = templateByKey.get(tid);
+      const categoryId = String(template?.categoryId || "unknown").trim() || "unknown";
+      const subcategoryId = String(template?.subcategoryId || "unknown").trim() || "unknown";
+      const categoryLabel = categoryName.get(categoryId) || categoryId;
+      const subcategoryLabel = subcategoryName.get(`${categoryId}::${subcategoryId}`) || subcategoryId;
+      const productLabel = item?.templateName || template?.name || template?.template?.name || tid || "Unknown product";
+      if (inLast30) {
+        last30Quantity += quantity;
+        addSalesMetric(categoryMap, categoryId, categoryLabel, itemRevenue, quantity);
+        addSalesMetric(subcategoryMap, `${categoryId}::${subcategoryId}`, `${categoryLabel} / ${subcategoryLabel}`, itemRevenue, quantity);
+        addSalesMetric(productMap, tid || productLabel, productLabel, itemRevenue, quantity);
+      }
+    }
+  }
+
+  const sortTop = (map) =>
+    [...map.values()]
+      .sort((a, b) => b.revenueCents - a.revenueCents || b.quantity - a.quantity)
+      .slice(0, 20);
+
+  return {
+    generatedAt: new Date().toISOString(),
+    totalRevenueCents,
+    paidOrderCount: orders.length,
+    last30Days: {
+      revenueCents: last30RevenueCents,
+      orderCount: last30OrderCount,
+      quantity: last30Quantity,
+      averageRevenuePerDayCents: Math.round(last30RevenueCents / 30),
+      averageOrdersPerDay: Number((last30OrderCount / 30).toFixed(2)),
+      averageOrderValueCents: last30OrderCount ? Math.round(last30RevenueCents / last30OrderCount) : 0,
+    },
+    revenueLast30Days: dateSeries(30, last30RevenueByDay, "revenueCents"),
+    ordersLast30Days: dateSeries(30, last30OrdersByDay, "count"),
+    topCategories: sortTop(categoryMap),
+    topSubcategories: sortTop(subcategoryMap),
+    topProducts: sortTop(productMap),
+  };
+}
+
 const ORDER_STATUSES_WITH_PAYMENT = [...new Set([...ORDER_STATUSES, "pending_payment", "payment_failed"])];
 
 // ---------- Public: Prices ----------
@@ -1041,20 +1329,7 @@ app.get("/api/admin/orders", maybeRequireAdmin, async (req, res) => {
     const email = req.query.email ? String(req.query.email).trim() : "";
 
     if (dbConnected()) {
-      const and = [];
-      if (status) and.push({ status });
-      if (email) {
-        const emailRe = new RegExp(escapeRegex(email), "i");
-        const matchingUsers = await CustomerUser.find({ email: emailRe }).select("_id").lean();
-        const cids = matchingUsers.map((u) => u._id);
-        const byPublicId = await CustomerUser.find({ publicId: emailRe }).select("_id").lean();
-        const pubCids = byPublicId.map((u) => u._id);
-        const or = [{ "customer.email": emailRe }, { orderCode: emailRe }];
-        if (cids.length) or.push({ customerId: { $in: cids } });
-        if (pubCids.length) or.push({ customerId: { $in: pubCids } });
-        and.push({ $or: or });
-      }
-      const filter = and.length === 0 ? {} : and.length === 1 ? and[0] : { $and: and };
+      const filter = await buildAdminOrdersFilter(status, email);
       const skip = (page - 1) * limit;
       // Exclude `items` (Mixed / large cart+design data). List view only needs summary fields; full line items load on order detail.
       const [total, docs] = await Promise.all([
@@ -1099,6 +1374,38 @@ app.get("/api/admin/orders", maybeRequireAdmin, async (req, res) => {
     return res.json(payload);
   } catch (e) {
     console.error("[orders] GET /api/admin/orders failed:", e?.message || e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+/** CSV export of all matching admin orders, including full line items for tax/revenue reporting. */
+app.get("/api/admin/orders/export.csv", maybeRequireAdmin, async (req, res) => {
+  try {
+    const status = req.query.status ? String(req.query.status).trim() : "";
+    const email = req.query.email ? String(req.query.email).trim() : "";
+    let orders;
+    if (dbConnected()) {
+      const filter = await buildAdminOrdersFilter(status, email);
+      const docs = await Order.find(filter)
+        .populate({ path: "customerId", select: CUSTOMER_ID_POPULATE_SELECT })
+        .sort({ createdAt: -1 })
+        .lean();
+      orders = docs.map(orderToJson).filter(Boolean);
+    } else {
+      orders = getOrdersPage({
+        status: status || undefined,
+        email: email || undefined,
+        page: 1,
+        limit: 100000,
+      }).orders;
+    }
+    const csv = ordersCsv(orders);
+    const stamp = new Date().toISOString().slice(0, 10);
+    res.setHeader("Content-Type", "text/csv; charset=utf-8");
+    res.setHeader("Content-Disposition", `attachment; filename="orders-export-${stamp}.csv"`);
+    return res.send(csv);
+  } catch (e) {
+    console.error("[orders] export failed:", e?.message || e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -1576,6 +1883,17 @@ app.get("/api/admin/stats", maybeRequireAdmin, async (req, res) => {
     res.setHeader("X-Admin-Stats-Cache", "miss");
     return res.json(bodyNoDb);
   } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Hidden admin sales analytics page data. Not cached with dashboard stats because it scans order items.
+app.get("/api/admin/sales-stats", maybeRequireAdmin, async (req, res) => {
+  try {
+    const body = await buildAdminSalesStats();
+    res.json(body);
+  } catch (e) {
+    console.error("[admin] sales-stats failed:", e?.message || e);
     res.status(500).json({ error: e.message });
   }
 });
