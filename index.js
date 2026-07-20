@@ -697,10 +697,10 @@ app.post("/api/admin/templates", maybeRequireAdmin, async (req, res) => {
   }
 });
 
-app.put("/api/admin/templates/:id", maybeRequireAdmin, async (req, res) => {
+async function updateAdminTemplate(req, res, rawParam) {
   try {
     if (!dbConnected()) return res.status(503).json({ error: "Database not connected" });
-    const param = (req.params.id || "").trim();
+    const param = String(rawParam || "").trim();
     if (!param) return res.status(400).json({ error: "Missing template id" });
     const doc = await Template.findOne({
       $or: [
@@ -740,12 +740,12 @@ app.put("/api/admin/templates/:id", maybeRequireAdmin, async (req, res) => {
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
-});
+}
 
-app.delete("/api/admin/templates/:id", maybeRequireAdmin, async (req, res) => {
+async function deleteAdminTemplate(req, res, rawParam) {
   try {
     if (!dbConnected()) return res.status(503).json({ error: "Database not connected" });
-    const param = (req.params.id || "").trim();
+    const param = String(rawParam || "").trim();
     if (!param) return res.status(400).json({ error: "Missing template id" });
     const doc = await Template.findOne({
       $or: [
@@ -779,6 +779,23 @@ app.delete("/api/admin/templates/:id", maybeRequireAdmin, async (req, res) => {
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
+}
+
+app.put("/api/admin/templates/:id", maybeRequireAdmin, async (req, res) => {
+  return updateAdminTemplate(req, res, req.params.id);
+});
+
+// Hierarchical ids (category/subcategory/slug) become multi-segment paths; :id only matches one segment.
+app.put("/api/admin/templates/*", maybeRequireAdmin, async (req, res) => {
+  return updateAdminTemplate(req, res, req.params[0]);
+});
+
+app.delete("/api/admin/templates/:id", maybeRequireAdmin, async (req, res) => {
+  return deleteAdminTemplate(req, res, req.params.id);
+});
+
+app.delete("/api/admin/templates/*", maybeRequireAdmin, async (req, res) => {
+  return deleteAdminTemplate(req, res, req.params[0]);
 });
 
 // ---------- Public: Create order (legacy, no Stripe) - only when no DB ----------
