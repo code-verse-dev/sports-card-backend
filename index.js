@@ -5,6 +5,8 @@ import { fileURLToPath } from "url";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 import http from "http";
+import https from "https";
+import credentials from "./config/ssl.js";
 import express from "express";
 import cors from "cors";
 import jwt from "jsonwebtoken";
@@ -2683,9 +2685,13 @@ async function seedAdminIfNeeded() {
   } catch (err) {
     console.error("DB connect failed:", err.message);
   }
-  const server = http.createServer(app);
+  const isCustomDev = process.env.NODE_ENV === "customdev";
+  const server = isCustomDev
+    ? https.createServer(credentials, app)
+    : http.createServer(app);
   initAdminSocket(server);
   server.listen(PORT, HOST, () => {
-    console.log(`Server running at http://${HOST}:${PORT}`);
+    const proto = isCustomDev ? "https" : "http";
+    console.log(`Server running at ${proto}://${HOST}:${PORT} (${process.env.NODE_ENV || "development"})`);
   });
 })();
