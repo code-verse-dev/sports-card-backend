@@ -220,6 +220,7 @@ function orderExportRows(order) {
   return items.map((item) => ({
     orderNumber: getOrderRef(order),
     dateOfOrder: order.createdAt ? new Date(order.createdAt).toISOString() : "",
+    orderStatus: order.status || "",
     orderAmount: moneyFromCents(orderAmountCents),
     productAmount: moneyFromCents(item?.priceCents),
     shippingAmount: moneyFromCents(order.shippingCents),
@@ -239,6 +240,7 @@ function ordersCsv(orders) {
   const headers = [
     "Order #",
     "Date of order",
+    "Order Status",
     "Order Amount ($)",
     "Product Amount ($)",
     "Shipping Amount ($)",
@@ -259,6 +261,7 @@ function ordersCsv(orders) {
       [
         row.orderNumber,
         row.dateOfOrder,
+        row.orderStatus,
         row.orderAmount,
         row.productAmount,
         row.shippingAmount,
