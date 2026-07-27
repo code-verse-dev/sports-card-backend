@@ -1,5 +1,7 @@
 import { Router } from "express";
 import mongoose from "mongoose";
+import crypto from "crypto";
+import jwt from "jsonwebtoken";
 import { CustomerUser, hashCustomerPassword } from "../models/CustomerUser.js";
 import { resolveCustomerPublicDisplayId } from "../services/publicCodes.js";
 import { signToken, requireCustomer } from "../middleware/auth.js";
@@ -13,8 +15,17 @@ import {
 } from "../services/orderSnapshotValidation.js";
 import { sendDesignReviewSubmittedAdminEmail } from "../services/orderEmails.js";
 import { emitAdminNotification } from "../services/adminSocketHub.js";
+import {
+  getMailBrandName,
+  getPublicAppBase,
+  isMailConfigured,
+  sendMailMessage,
+} from "../services/mail.js";
 
 const router = Router();
+const PASSWORD_RESET_CODE_TTL_MS = 15 * 60 * 1000;
+const PASSWORD_RESET_TOKEN_TTL = "10m";
+const PASSWORD_RESET_MAX_ATTEMPTS = 5;
 
 /** Pick a short image ref from designSnapshot for list thumbnails (upload UUID / uuid.ext / http URL — skips data: URLs). */
 function previewImageRefFromSnapshot(designSnapshot) {
@@ -39,6 +50,55 @@ function previewImageRefFromSnapshot(designSnapshot) {
     if (UPLOAD_ID_RE.test(base)) return base;
   }
   return undefined;
+}
+
+function normalizeEmail(value) {
+  return String(value || "").trim().toLowerCase();
+}
+
+function validEmail(value) {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(value || "").trim());
+}
+
+function passwordResetSecret() {
+  return process.env.PASSWORD_RESET_SECRET || process.env.JWT_SECRET || "dev-secret";
+}
+
+function hashPasswordResetCode(email, code) {
+  return crypto
+    .createHash("sha256")
+    .update(`${normalizeEmail(email)}:${String(code || "").trim()}:${passwordResetSecret()}`)
+    .digest("hex");
+}
+
+function createPasswordResetCode() {
+  return String(crypto.randomInt(0, 1000000)).padStart(6, "0");
+}
+
+function publicResetCodeForDev(code) {
+  const isProduction = process.env.NODE_ENV === "production";
+  return !isProduction && !isMailConfigured() ? code : undefined;
+}
+
+async function sendPasswordResetEmail(user, code) {
+  const brand = getMailBrandName();
+  const base = getPublicAppBase();
+  const resetUrl = base ? `${base}/verification-code` : "";
+  const html = `
+    <div style="font-family:Arial,sans-serif;color:#0f172a;line-height:1.5;">
+      <h2 style="margin:0 0 12px;">Reset your ${brand} password</h2>
+      <p>Use this verification code to continue resetting your password:</p>
+      <p style="font-size:28px;font-weight:700;letter-spacing:6px;margin:20px 0;">${code}</p>
+      <p>This code expires in 15 minutes. If you did not request this, you can ignore this email.</p>
+      ${resetUrl ? `<p><a href="${resetUrl}" style="color:#043264;">Continue password reset</a></p>` : ""}
+    </div>
+  `;
+  await sendMailMessage({
+    to: user.email,
+    subject: `Reset your ${brand} password`,
+    html,
+    text: `Use this verification code to reset your ${brand} password: ${code}. It expires in 15 minutes.`,
+  });
 }
 
 /** POST /api/user/register - body: { email, password, firstName?, lastName?, phone?, address?, addressLine2?, city?, state?, zip?, country? }. Creates customer account. */
@@ -152,6 +212,126 @@ router.post("/login", async (req, res) => {
     });
   } catch (e) {
     res.status(500).json({ error: e.message || "Login failed" });
+  }
+});
+
+/** POST /api/user/forgot-password - body: { email }. Sends a short-lived reset code. */
+router.post("/forgot-password", async (req, res) => {
+  try {
+    if (!dbConnected()) return res.status(503).json({ error: "Password reset is not available" });
+    const email = normalizeEmail(req.body?.email);
+    if (!email || !validEmail(email)) {
+      return res.status(400).json({ error: "A valid email is required" });
+    }
+
+    const generic = {
+      message: "If an account exists for that email, a verification code has been sent.",
+    };
+    const user = await CustomerUser.findOne({ email }).select("+passwordHash");
+    if (!user?.passwordHash) return res.json(generic);
+
+    const code = createPasswordResetCode();
+    user.passwordResetCodeHash = hashPasswordResetCode(email, code);
+    user.passwordResetExpiresAt = new Date(Date.now() + PASSWORD_RESET_CODE_TTL_MS);
+    user.passwordResetAttempts = 0;
+    await user.save();
+
+    const debugCode = publicResetCodeForDev(code);
+    try {
+      await sendPasswordResetEmail(user, code);
+    } catch (e) {
+      user.passwordResetCodeHash = undefined;
+      user.passwordResetExpiresAt = undefined;
+      user.passwordResetAttempts = 0;
+      await user.save();
+      console.error("[user] forgot-password email failed:", e?.message || e);
+      return res.status(500).json({ error: "Could not send verification code. Try again later." });
+    }
+
+    if (debugCode) console.warn(`[user] Dev password reset code for ${email}: ${debugCode}`);
+    res.json({ ...generic, ...(debugCode ? { resetCode: debugCode } : {}) });
+  } catch (e) {
+    res.status(500).json({ error: e.message || "Could not start password reset" });
+  }
+});
+
+/** POST /api/user/verify-reset-code - body: { email, code }. Returns a short-lived reset token. */
+router.post("/verify-reset-code", async (req, res) => {
+  try {
+    if (!dbConnected()) return res.status(503).json({ error: "Password reset is not available" });
+    const email = normalizeEmail(req.body?.email);
+    const code = String(req.body?.code || "").replace(/\D/g, "");
+    if (!email || !validEmail(email) || code.length !== 6) {
+      return res.status(400).json({ error: "Email and 6-digit code are required" });
+    }
+
+    const user = await CustomerUser.findOne({ email }).select(
+      "+passwordResetCodeHash +passwordResetExpiresAt +passwordResetAttempts"
+    );
+    const expired = !user?.passwordResetExpiresAt || user.passwordResetExpiresAt.getTime() < Date.now();
+    const locked = Number(user?.passwordResetAttempts || 0) >= PASSWORD_RESET_MAX_ATTEMPTS;
+    const hash = hashPasswordResetCode(email, code);
+    if (!user || expired || locked || user.passwordResetCodeHash !== hash) {
+      if (user && !expired && !locked) {
+        user.passwordResetAttempts = Number(user.passwordResetAttempts || 0) + 1;
+        await user.save();
+      }
+      return res.status(400).json({ error: "Invalid or expired verification code" });
+    }
+
+    const resetToken = jwt.sign(
+      { userId: user._id.toString(), email, resetHash: user.passwordResetCodeHash, type: "customer-password-reset" },
+      passwordResetSecret(),
+      { expiresIn: PASSWORD_RESET_TOKEN_TTL }
+    );
+    res.json({ message: "Code verified", resetToken });
+  } catch (e) {
+    res.status(500).json({ error: e.message || "Could not verify reset code" });
+  }
+});
+
+/** POST /api/user/reset-password - body: { email, resetToken, password }. */
+router.post("/reset-password", async (req, res) => {
+  try {
+    if (!dbConnected()) return res.status(503).json({ error: "Password reset is not available" });
+    const email = normalizeEmail(req.body?.email);
+    const resetToken = String(req.body?.resetToken || "").trim();
+    const password = String(req.body?.password || req.body?.newPassword || "").trim();
+    if (!email || !validEmail(email) || !resetToken) {
+      return res.status(400).json({ error: "Email and reset token are required" });
+    }
+    if (password.length < 6) {
+      return res.status(400).json({ error: "Password must be at least 6 characters" });
+    }
+
+    let payload;
+    try {
+      payload = jwt.verify(resetToken, passwordResetSecret());
+    } catch {
+      return res.status(400).json({ error: "Reset session expired. Request a new code." });
+    }
+    if (payload?.type !== "customer-password-reset" || normalizeEmail(payload.email) !== email || !payload.userId || !payload.resetHash) {
+      return res.status(400).json({ error: "Invalid reset session" });
+    }
+
+    const user = await CustomerUser.findOne({ _id: payload.userId, email }).select(
+      "+passwordResetCodeHash +passwordResetExpiresAt"
+    );
+    if (!user?.passwordResetCodeHash || !user.passwordResetExpiresAt || user.passwordResetExpiresAt.getTime() < Date.now()) {
+      return res.status(400).json({ error: "Reset session expired. Request a new code." });
+    }
+    if (user.passwordResetCodeHash !== payload.resetHash) {
+      return res.status(400).json({ error: "Reset session expired. Request a new code." });
+    }
+
+    user.passwordHash = await hashCustomerPassword(password);
+    user.passwordResetCodeHash = undefined;
+    user.passwordResetExpiresAt = undefined;
+    user.passwordResetAttempts = 0;
+    await user.save();
+    res.json({ message: "Password reset successful" });
+  } catch (e) {
+    res.status(500).json({ error: e.message || "Could not reset password" });
   }
 });
 
