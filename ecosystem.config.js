@@ -2,7 +2,7 @@ module.exports = {
   apps: [
     {
       name: "sports-card-backend",
-      script: "dist/index.js",
+      script: "index.js",
       instances: 1,
       autorestart: true,
       watch: false,
