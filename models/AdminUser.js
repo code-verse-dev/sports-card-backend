@@ -10,6 +10,7 @@ const adminUserSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
+
 adminUserSchema.methods.comparePassword = async function (plain) {
   return bcrypt.compare(plain, this.passwordHash);
 };
