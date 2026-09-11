@@ -16,8 +16,9 @@ import { listTemplates } from "./db.js";
 
 const UPLOADS_DIR = path.join(process.cwd(), "uploads");
 
-/** Max size per file (20 MB). If using a reverse proxy (e.g. nginx), set client_max_body_size to match. */
-const MAX_UPLOAD_BYTES = 20 * 1024 * 1024;
+/** Max size per file (5 MB). If using a reverse proxy (e.g. nginx), set client_max_body_size to match. */
+const MAX_UPLOAD_BYTES = 5 * 1024 * 1024;
+const MAX_UPLOAD_MB = Math.round(MAX_UPLOAD_BYTES / (1024 * 1024));
 
 const MIME_BY_EXT = {
   ".png": "image/png",
@@ -58,6 +59,17 @@ const upload = multer({
   },
 });
 
+function handleMulterUpload(req, res, next) {
+  upload.single("file")(req, res, (err) => {
+    if (!err) return next();
+    if (err.code === "LIMIT_FILE_SIZE") {
+      return res.status(413).json({ error: `Image must be under ${MAX_UPLOAD_MB} MB.` });
+    }
+    const message = err.message || "Upload failed";
+    return res.status(400).json({ error: message });
+  });
+}
+
 function handleSingleImageUpload(req, res) {
   if (!req.file) {
     return res.status(400).json({ error: "Missing file (field: file)" });
@@ -73,7 +85,7 @@ function handleSingleImageUpload(req, res) {
  */
 export function registerCheckoutDesignUpload(app) {
   ensureUploadsDir().catch((err) => console.error("Uploads dir init:", err));
-  app.post("/api/orders/checkout-upload", upload.single("file"), handleSingleImageUpload);
+  app.post("/api/orders/checkout-upload", handleMulterUpload, handleSingleImageUpload);
 }
 
 export function registerUploadsRouter(app) {
@@ -129,7 +141,7 @@ export function registerUploadsRouter(app) {
     }
   });
 
-  app.post("/api/admin/uploads", upload.single("file"), handleSingleImageUpload);
+  app.post("/api/admin/uploads", handleMulterUpload, handleSingleImageUpload);
 
   app.get("/api/admin/uploads", async (_req, res) => {
     try {

@@ -1,0 +1,127 @@
+{
+  "orderCode": "SCWKN68RZ",
+  "mongoId": "6aa3798e16cfdedce08dccc2",
+  "savedAt": "2026-09-11T16:24:14.356Z",
+  "items": [
+    {
+      "idx": 0,
+      "templateId": "sports/soccer/soccer-4/guava",
+      "imageFields": {
+        "front_image_0": "ee2c7cae-486f-4780-a463-ba075b99b541",
+        "back_image_0": "e0ad9768-f288-4304-9e20-cf92d85775be"
+      }
+    },
+    {
+      "idx": 1,
+      "templateId": "sports/soccer/soccer-4/guava",
+      "imageFields": {
+        "front_image_0": "502ab646-059f-4024-8c3d-4c41c69dc91f",
+        "back_image_0": "44132ba1-9a45-4628-b7d6-059462442f46"
+      }
+    },
+    {
+      "idx": 2,
+      "templateId": "sports/soccer/soccer-4/guava",
+      "imageFields": {
+        "front_image_0": "78f202e8-ffe7-4e2d-a5d6-95965eb4785b",
+        "back_image_0": "c64007a7-c31f-42bf-bf50-8b825184c05a"
+      }
+    },
+    {
+      "idx": 3,
+      "templateId": "sports/soccer/soccer-4/guava",
+      "imageFields": {
+        "front_image_0": "6ad6d2cc-5c50-411d-bc88-3fcbb5c06cc3",
+        "back_image_0": "0819fd19-dbe4-477e-9a63-1371965089dd"
+      }
+    },
+    {
+      "idx": 4,
+      "templateId": "sports/soccer/soccer-4/guava",
+      "imageFields": {
+        "front_image_0": "a30e4f9c-5a2f-4449-abcc-a8940a02f8ba",
+        "back_image_0": "15543fb8-7287-4af6-85dc-91e41080a153"
+      }
+    },
+    {
+      "idx": 5,
+      "templateId": "sports/soccer/soccer-4/guava",
+      "imageFields": {
+        "front_image_0": "9b085676-b67c-4b85-9120-8c19509ce27b",
+        "back_image_0": "da9a08ad-9167-4eee-b843-0f0d4d575e24"
+      }
+    },
+    {
+      "idx": 6,
+      "templateId": "sports/soccer/soccer-4/guava",
+      "imageFields": {
+        "front_image_0": "5b4258dc-c5f4-45a6-8097-26616c9988f4",
+        "back_image_0": "691e7284-96d3-401e-afc8-f4cbfc57b71a"
+      }
+    },
+    {
+      "idx": 7,
+      "templateId": "sports/soccer/soccer-4/guava",
+      "imageFields": {
+        "front_image_0": "96fb5af3-6440-4525-8ac5-c93a00d32fd0",
+        "back_image_0": "6347dfed-2ed7-4897-ad0e-86da5e59c591"
+      }
+    },
+    {
+      "idx": 8,
+      "templateId": "sports/soccer/soccer-4/guava",
+      "imageFields": {
+        "front_image_0": "ee3bf74b-cf70-4137-ba13-60cc86b1876b",
+        "back_image_0": "776544d7-b253-43ca-9878-3545d0c225ca"
+      }
+    },
+    {
+      "idx": 9,
+      "templateId": "sports/soccer/soccer-4/guava",
+      "imageFields": {
+        "front_image_0": "1205cd7c-d660-426b-8573-21b6ac94e0c3",
+        "back_image_0": "572458f6-40e2-452a-aaa7-de6b825c4ae4"
+      }
+    },
+    {
+      "idx": 10,
+      "templateId": "sports/soccer/soccer-4/guava",
+      "imageFields": {
+        "front_image_0": "6a037227-6fca-462b-9429-8719e7195cc5",
+        "back_image_0": "48a24c80-a53f-418d-bb97-3c8351516250"
+      }
+    },
+    {
+      "idx": 11,
+      "templateId": "sports/soccer/soccer-4/guava",
+      "imageFields": {
+        "front_image_0": "01cf285d-4f53-4ba3-816e-3b2aa975c5db",
+        "back_image_0": "557300cc-c2e8-4712-8ab8-1a867a780e06"
+      }
+    },
+    {
+      "idx": 12,
+      "templateId": "sports/soccer/soccer-4/guava",
+      "imageFields": {
+        "front_image_0": "8121a1e5-9409-435b-90f7-495ef9077584",
+        "back_image_0": "7e648f6e-7390-40e3-91bc-9f9811e5b3a8"
+      }
+    },
+    {
+      "idx": 13,
+      "templateId": "sports/soccer/soccer-4/guava",
+      "imageFields": {
+        "front_image_0": "6e57a4a2-a4d5-441b-8813-53ad81ec6853",
+        "back_image_0": "e6764a07-c128-4c52-ab11-9a643b5df631"
+      }
+    },
+    {
+      "idx": 14,
+      "templateId": "sports/soccer/soccer-4/guava",
+      "imageFields": {
+        "front_image_0": "4198d526-d72d-4ec3-8175-9b640e54ee80",
+        "back_image_0": "8c40663d-6153-43b5-8b9b-3bf127708b0f"
+      }
+    }
+  ]
+}
